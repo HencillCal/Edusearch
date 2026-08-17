@@ -36,6 +36,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, type ApiDocument, type OcrJob } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  PromptModal,
+  ConfirmModal,
+  type PromptModalState,
+  type ConfirmModalState,
+} from "@/components/ui/prompt-dialog";
 
 export const Route = createFileRoute("/admin")({
   head: () => ({
@@ -160,6 +166,9 @@ function AdminPage() {
   const [newUserPassword, setNewUserPassword] = useState("");
   const [newUserRole, setNewUserRole] = useState<"admin" | "user">("user");
   const [creatingUser, setCreatingUser] = useState(false);
+  const [promptModal, setPromptModal] = useState<PromptModalState | null>(null);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+
   const dashboard = useQuery({
     queryKey: ["admin", "dashboard"],
     queryFn: () => apiFetch<Dashboard>("/api/admin/dashboard"),
@@ -220,14 +229,11 @@ function AdminPage() {
     retry: false,
   });
 
-  const moderate = async (documentId: string, action: "approve" | "reject" | "request_changes") => {
-    const reason =
-      action === "approve"
-        ? undefined
-        : window.prompt(
-            action === "reject" ? "Reason for rejection" : "What should the contributor change?",
-          ) || undefined;
-    if (action !== "approve" && !reason) return;
+  const submitModeration = async (
+    documentId: string,
+    action: "approve" | "reject" | "request_changes",
+    reason?: string,
+  ) => {
     try {
       await apiFetch(`/api/admin/documents/${encodeURIComponent(documentId)}`, {
         method: "PATCH",
@@ -241,28 +247,66 @@ function AdminPage() {
     }
   };
 
-  const resolveReport = async (reportId: string, status: "resolved" | "dismissed") => {
-    const resolutionNote = window
-      .prompt(
-        status === "resolved"
-          ? "How was this report resolved?"
-          : "Why should this report be dismissed?",
-      )
-      ?.trim();
-    if (!resolutionNote) return;
-    try {
-      await apiFetch(`/api/admin/reports/${encodeURIComponent(reportId)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status, resolutionNote }),
-      });
-      toast.success(`Report ${status}`);
-      await queryClient.invalidateQueries({ queryKey: ["admin"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update report");
+  const moderate = (documentId: string, action: "approve" | "reject" | "request_changes") => {
+    if (action === "approve") {
+      submitModeration(documentId, action);
+      return;
     }
+    setPromptModal({
+      open: true,
+      title: action === "reject" ? "Reason for Rejection" : "Changes Requested",
+      fields: [
+        {
+          name: "reason",
+          label: action === "reject" ? "Reason for rejection" : "What should the contributor change?",
+          type: "textarea",
+          required: true,
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        if (!values.reason?.trim()) return;
+        await submitModeration(documentId, action, values.reason.trim());
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const updateCopyright = async (
+  const resolveReport = (reportId: string, status: "resolved" | "dismissed") => {
+    setPromptModal({
+      open: true,
+      title: status === "resolved" ? "Resolve Report" : "Dismiss Report",
+      fields: [
+        {
+          name: "resolutionNote",
+          label:
+            status === "resolved"
+              ? "How was this report resolved?"
+              : "Why should this report be dismissed?",
+          type: "textarea",
+          required: true,
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const resolutionNote = values.resolutionNote?.trim();
+        if (!resolutionNote) return;
+        try {
+          await apiFetch(`/api/admin/reports/${encodeURIComponent(reportId)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status, resolutionNote }),
+          });
+          toast.success(`Report ${status}`);
+          await queryClient.invalidateQueries({ queryKey: ["admin"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not update report");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
+  };
+
+  const updateCopyright = (
     requestId: string,
     action:
       | "review"
@@ -274,30 +318,41 @@ function AdminPage() {
       | "dismiss",
   ) => {
     const needsNote = !["review", "contact_uploader"].includes(action);
-    const note = needsNote
-      ? window.prompt(`Decision note for ${action.replaceAll("_", " ")}`)?.trim()
-      : (window
-          .prompt(
+    setPromptModal({
+      open: true,
+      title: `Copyright Action: ${action.replaceAll("_", " ")}`,
+      fields: [
+        {
+          name: "note",
+          label:
             action === "contact_uploader"
               ? "What rights information should the uploader provide?"
-              : "Optional review note",
-          )
-          ?.trim() ?? "");
-    if (needsNote && !note) return;
-    try {
-      await apiFetch(`/api/admin/copyright-requests/${encodeURIComponent(requestId)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ action, note }),
-      });
-      toast.success(`Copyright request updated: ${action.replaceAll("_", " ")}`);
-      await queryClient.invalidateQueries({ queryKey: ["admin"] });
-      await queryClient.invalidateQueries({ queryKey: ["home"] });
-      await queryClient.invalidateQueries({ queryKey: ["search"] });
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not update the copyright request",
-      );
-    }
+              : "Review / decision note",
+          type: "textarea",
+          required: needsNote,
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const note = values.note?.trim() ?? "";
+        if (needsNote && !note) return;
+        try {
+          await apiFetch(`/api/admin/copyright-requests/${encodeURIComponent(requestId)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ action, note }),
+          });
+          toast.success(`Copyright request updated: ${action.replaceAll("_", " ")}`);
+          await queryClient.invalidateQueries({ queryKey: ["admin"] });
+          await queryClient.invalidateQueries({ queryKey: ["home"] });
+          await queryClient.invalidateQueries({ queryKey: ["search"] });
+        } catch (error) {
+          toast.error(
+            error instanceof Error ? error.message : "Could not update the copyright request",
+          );
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
   const reindexSearch = async () => {
@@ -376,83 +431,128 @@ function AdminPage() {
     }
   };
 
-  const editUser = async (user: AdminUser) => {
-    const name = window.prompt("Full name", user.name)?.trim();
-    if (!name) return;
-    const email = window.prompt("Email address", user.email)?.trim();
-    if (!email) return;
-    const roleInput = window.prompt("Role: admin or user", user.role)?.trim().toLowerCase();
-    if (roleInput !== "admin" && roleInput !== "user")
-      return toast.error("Role must be admin or user");
-    const password = window.prompt("New password (leave blank to keep current password)", "") ?? "";
-    if (password && password.length < 8)
-      return toast.error("Password must contain at least 8 characters");
-    try {
-      await apiFetch(`/api/admin/users/${encodeURIComponent(user.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ name, email, role: roleInput, ...(password ? { password } : {}) }),
-      });
-      toast.success("Account updated");
-      await queryClient.invalidateQueries({ queryKey: ["admin"] });
-      await queryClient.invalidateQueries({ queryKey: ["auth"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update account");
-    }
+  const editUser = (user: AdminUser) => {
+    setPromptModal({
+      open: true,
+      title: `Edit User: ${user.name}`,
+      fields: [
+        { name: "name", label: "Full Name", defaultValue: user.name, required: true },
+        { name: "email", label: "Email Address", defaultValue: user.email, required: true },
+        {
+          name: "role",
+          label: "Role",
+          type: "select",
+          options: ["user", "admin"],
+          defaultValue: user.role,
+        },
+        { name: "password", label: "New Password (leave blank to keep current)", type: "password" },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const name = values.name?.trim();
+        const email = values.email?.trim();
+        const roleInput = values.role?.trim().toLowerCase();
+        const password = values.password || "";
+        if (!name || !email) return;
+        if (roleInput !== "admin" && roleInput !== "user")
+          return toast.error("Role must be admin or user");
+        if (password && password.length < 8)
+          return toast.error("Password must contain at least 8 characters");
+        try {
+          await apiFetch(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name, email, role: roleInput, ...(password ? { password } : {}) }),
+          });
+          toast.success("Account updated");
+          await queryClient.invalidateQueries({ queryKey: ["admin"] });
+          await queryClient.invalidateQueries({ queryKey: ["auth"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not update account");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const deleteUser = async (user: AdminUser) => {
-    if (
-      !window.confirm(
-        `Delete ${user.name} (${user.email})? Their owned libraries will transfer to you.`,
-      )
-    )
-      return;
-    try {
-      await apiFetch(`/api/admin/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
-      toast.success("Account deleted");
-      await queryClient.invalidateQueries({ queryKey: ["admin"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete account");
-    }
+  const deleteUser = (user: AdminUser) => {
+    setConfirmModal({
+      open: true,
+      title: `Delete ${user.name}?`,
+      description: `Delete ${user.name} (${user.email})? Their owned libraries will transfer to you.`,
+      destructive: true,
+      confirmLabel: "Delete Account",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(`/api/admin/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
+          toast.success("Account deleted");
+          await queryClient.invalidateQueries({ queryKey: ["admin"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not delete account");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
-  const editDocument = async (document: ApiDocument) => {
-    const title = window.prompt("Document title", document.title)?.trim();
-    if (!title) return;
-    const subject = window.prompt("Subject", document.subject)?.trim();
-    if (!subject) return;
-    const description = window.prompt("Description", document.description || "")?.trim();
-    if (description === undefined) return;
-    try {
-      await apiFetch(`/api/admin/documents/${encodeURIComponent(document.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ action: "update", title, subject, description }),
-      });
-      toast.success("Document updated");
-      await queryClient.invalidateQueries({ queryKey: ["admin"] });
-      await queryClient.invalidateQueries({ queryKey: ["home"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update document");
-    }
+  const editDocument = (document: ApiDocument) => {
+    setPromptModal({
+      open: true,
+      title: "Edit Document",
+      fields: [
+        { name: "title", label: "Document Title", defaultValue: document.title, required: true },
+        { name: "subject", label: "Subject", defaultValue: document.subject, required: true },
+        {
+          name: "description",
+          label: "Description",
+          type: "textarea",
+          defaultValue: document.description || "",
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const title = values.title?.trim();
+        const subject = values.subject?.trim();
+        const description = values.description?.trim();
+        if (!title || !subject) return;
+        try {
+          await apiFetch(`/api/admin/documents/${encodeURIComponent(document.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ action: "update", title, subject, description }),
+          });
+          toast.success("Document updated");
+          await queryClient.invalidateQueries({ queryKey: ["admin"] });
+          await queryClient.invalidateQueries({ queryKey: ["home"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not update document");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const deleteDocument = async (document: ApiDocument) => {
-    if (
-      !window.confirm(
-        `Permanently delete “${document.title}”? This removes its saved references, reports, ratings and stored file.`,
-      )
-    )
-      return;
-    try {
-      await apiFetch(`/api/admin/documents/${encodeURIComponent(document.id)}`, {
-        method: "DELETE",
-      });
-      toast.success("Document deleted");
-      await queryClient.invalidateQueries({ queryKey: ["admin"] });
-      await queryClient.invalidateQueries({ queryKey: ["home"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete document");
-    }
+  const deleteDocument = (document: ApiDocument) => {
+    setConfirmModal({
+      open: true,
+      title: `Permanently Delete "${document.title}"?`,
+      description: "This removes its saved references, reports, ratings and stored file.",
+      destructive: true,
+      confirmLabel: "Permanently Delete",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(`/api/admin/documents/${encodeURIComponent(document.id)}`, {
+            method: "DELETE",
+          });
+          toast.success("Document deleted");
+          await queryClient.invalidateQueries({ queryKey: ["admin"] });
+          await queryClient.invalidateQueries({ queryKey: ["home"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not delete document");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
   const updateMessage = async (id: string, status: "in_progress" | "resolved" | "spam") => {
@@ -469,73 +569,118 @@ function AdminPage() {
     }
   };
 
-  const editSubject = async (subject: TaxonomyResponse["subjects"][number]) => {
-    const name = window.prompt("Subject name", subject.name)?.trim();
-    if (!name) return;
-    const description = window.prompt("Subject description", subject.description || "")?.trim();
-    if (description === undefined) return;
-    try {
-      await apiFetch(`/api/admin/subjects/${subject.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ name, description, renameDocuments: name !== subject.name }),
-      });
-      toast.success("Subject updated");
-      await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
-      await queryClient.invalidateQueries({ queryKey: ["subjects"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update subject");
-    }
+  const editSubject = (subject: TaxonomyResponse["subjects"][number]) => {
+    setPromptModal({
+      open: true,
+      title: "Edit Subject",
+      fields: [
+        { name: "name", label: "Subject Name", defaultValue: subject.name, required: true },
+        {
+          name: "description",
+          label: "Subject Description",
+          type: "textarea",
+          defaultValue: subject.description || "",
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const name = values.name?.trim();
+        if (!name) return;
+        const description = values.description?.trim() || "";
+        try {
+          await apiFetch(`/api/admin/subjects/${subject.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name, description, renameDocuments: name !== subject.name }),
+          });
+          toast.success("Subject updated");
+          await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
+          await queryClient.invalidateQueries({ queryKey: ["subjects"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not update subject");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const deleteSubject = async (subject: TaxonomyResponse["subjects"][number]) => {
-    if (
-      !window.confirm(
-        `Delete subject “${subject.name}”? This is blocked while documents still use it.`,
-      )
-    )
-      return;
-    try {
-      await apiFetch(`/api/admin/subjects/${subject.id}`, { method: "DELETE" });
-      toast.success("Subject deleted");
-      await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete subject");
-    }
+  const deleteSubject = (subject: TaxonomyResponse["subjects"][number]) => {
+    setConfirmModal({
+      open: true,
+      title: `Delete Subject "${subject.name}"?`,
+      description: "This is blocked while documents still use it.",
+      destructive: true,
+      confirmLabel: "Delete Subject",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(`/api/admin/subjects/${subject.id}`, { method: "DELETE" });
+          toast.success("Subject deleted");
+          await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not delete subject");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
-  const editTopic = async (topic: TaxonomyResponse["topics"][number]) => {
-    const name = window.prompt("Topic name", topic.name)?.trim();
-    if (!name) return;
-    const synonyms = window.prompt("Synonyms separated by commas", topic.synonyms.join(", "));
-    if (synonyms === null) return;
-    try {
-      await apiFetch(`/api/admin/topics/${topic.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name,
-          subjectId: topic.subjectId,
-          synonyms: synonyms
-            .split(",")
-            .map((item) => item.trim())
-            .filter(Boolean),
-        }),
-      });
-      toast.success("Topic updated");
-      await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update topic");
-    }
+  const editTopic = (topic: TaxonomyResponse["topics"][number]) => {
+    setPromptModal({
+      open: true,
+      title: "Edit Topic",
+      fields: [
+        { name: "name", label: "Topic Name", defaultValue: topic.name, required: true },
+        {
+          name: "synonyms",
+          label: "Synonyms (separated by commas)",
+          defaultValue: topic.synonyms.join(", "),
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const name = values.name?.trim();
+        if (!name) return;
+        const synonyms = values.synonyms || "";
+        try {
+          await apiFetch(`/api/admin/topics/${topic.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              name,
+              subjectId: topic.subjectId,
+              synonyms: synonyms
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean),
+            }),
+          });
+          toast.success("Topic updated");
+          await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not update topic");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const deleteTopic = async (topic: TaxonomyResponse["topics"][number]) => {
-    if (!window.confirm(`Delete topic “${topic.name}”?`)) return;
-    try {
-      await apiFetch(`/api/admin/topics/${topic.id}`, { method: "DELETE" });
-      toast.success("Topic deleted");
-      await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete topic");
-    }
+  const deleteTopic = (topic: TaxonomyResponse["topics"][number]) => {
+    setConfirmModal({
+      open: true,
+      title: `Delete Topic "${topic.name}"?`,
+      destructive: true,
+      confirmLabel: "Delete Topic",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(`/api/admin/topics/${topic.id}`, { method: "DELETE" });
+          toast.success("Topic deleted");
+          await queryClient.invalidateQueries({ queryKey: ["admin", "taxonomy"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not delete topic");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
   if (!auth.isLoading && auth.data?.user?.role !== "admin") {
@@ -1312,6 +1457,8 @@ function AdminPage() {
         </div>
       </main>
       <SiteFooter />
+      <PromptModal modalState={promptModal} />
+      <ConfirmModal modalState={confirmModal} />
     </div>
   );
 }

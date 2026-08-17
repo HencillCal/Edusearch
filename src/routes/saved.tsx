@@ -21,6 +21,12 @@ import { apiFetch, type ApiDocument } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import {
+  PromptModal,
+  ConfirmModal,
+  type PromptModalState,
+  type ConfirmModalState,
+} from "@/components/ui/prompt-dialog";
 
 export const Route = createFileRoute("/saved")({
   head: () => ({ meta: [{ title: "Saved documents and collections — EduSearch AI" }] }),
@@ -36,6 +42,9 @@ function SavedPage() {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [selectedCollectionId, setSelectedCollectionId] = useState("");
+  const [promptModal, setPromptModal] = useState<PromptModalState | null>(null);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+
   const query = useQuery({
     queryKey: ["saved"],
     queryFn: () => apiFetch<SavedResponse>("/api/saved"),
@@ -71,45 +80,81 @@ function SavedPage() {
     retry: false,
   });
 
-  const createCollection = async () => {
-    const name = window.prompt("Collection name")?.trim();
-    if (!name) return;
-    try {
-      await apiFetch("/api/collections", { method: "POST", body: JSON.stringify({ name }) });
-      toast.success("Collection created");
-      await queryClient.invalidateQueries({ queryKey: ["saved"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not create collection");
-    }
+  const createCollection = () => {
+    setPromptModal({
+      open: true,
+      title: "Create Collection",
+      fields: [
+        {
+          name: "name",
+          label: "Collection Name",
+          placeholder: "e.g. End of Semester Revision",
+          required: true,
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const name = values.name?.trim();
+        if (!name) return;
+        try {
+          await apiFetch("/api/collections", { method: "POST", body: JSON.stringify({ name }) });
+          toast.success("Collection created");
+          await queryClient.invalidateQueries({ queryKey: ["saved"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not create collection");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const renameCollection = async (id: string, currentName: string) => {
-    const name = window.prompt("Collection name", currentName)?.trim();
-    if (!name || name === currentName) return;
-    try {
-      await apiFetch(`/api/collections/${encodeURIComponent(id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ name }),
-      });
-      toast.success("Collection renamed");
-      await queryClient.invalidateQueries({ queryKey: ["saved"] });
-      await queryClient.invalidateQueries({ queryKey: ["collection", id] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not rename collection");
-    }
+  const renameCollection = (id: string, currentName: string) => {
+    setPromptModal({
+      open: true,
+      title: "Rename Collection",
+      fields: [
+        { name: "name", label: "Collection Name", defaultValue: currentName, required: true },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const name = values.name?.trim();
+        if (!name || name === currentName) return;
+        try {
+          await apiFetch(`/api/collections/${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name }),
+          });
+          toast.success("Collection renamed");
+          await queryClient.invalidateQueries({ queryKey: ["saved"] });
+          await queryClient.invalidateQueries({ queryKey: ["collection", id] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not rename collection");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const deleteCollection = async (id: string, name: string) => {
-    if (!window.confirm(`Delete “${name}”? Saved documents will remain in your saved list.`))
-      return;
-    try {
-      await apiFetch(`/api/collections/${encodeURIComponent(id)}`, { method: "DELETE" });
-      if (selectedCollectionId === id) setSelectedCollectionId("");
-      toast.success("Collection deleted");
-      await queryClient.invalidateQueries({ queryKey: ["saved"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete collection");
-    }
+  const deleteCollection = (id: string, name: string) => {
+    setConfirmModal({
+      open: true,
+      title: `Delete Collection "${name}"?`,
+      description: "Saved documents will remain in your main saved list.",
+      destructive: true,
+      confirmLabel: "Delete Collection",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(`/api/collections/${encodeURIComponent(id)}`, { method: "DELETE" });
+          if (selectedCollectionId === id) setSelectedCollectionId("");
+          toast.success("Collection deleted");
+          await queryClient.invalidateQueries({ queryKey: ["saved"] });
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not delete collection");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
   const removeFromCollection = async (documentId: string) => {
@@ -358,6 +403,8 @@ function SavedPage() {
         )}
       </main>
       <SiteFooter />
+      <PromptModal modalState={promptModal} />
+      <ConfirmModal modalState={confirmModal} />
     </div>
   );
 }

@@ -22,6 +22,7 @@ import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ConfirmModal, type ConfirmModalState } from "@/components/ui/prompt-dialog";
 import {
   apiFetch,
   type OcrBlock,
@@ -89,6 +90,7 @@ function ScannerPage() {
   const [qualityMode, setQualityMode] = useState<OcrJob["qualityMode"]>("accurate");
   const [ocrLanguage, setOcrLanguage] = useState("eng");
   const [reprocessing, setReprocessing] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selectedJob = useQuery({
@@ -301,26 +303,30 @@ function ScannerPage() {
     }
   };
 
-  const restoreRevision = async (revision: number) => {
-    if (
-      !job ||
-      !window.confirm(
-        `Restore OCR revision ${revision}? A new revision will preserve the current history.`,
-      )
-    )
-      return;
-    try {
-      const result = await apiFetch<{ job: OcrJob }>(
-        `/api/ocr/jobs/${job.id}/revisions/${revision}/restore`,
-        { method: "POST" },
-      );
-      applyJob(result.job);
-      await queryClient.invalidateQueries({ queryKey: ["ocr-revisions", job.id] });
-      await queryClient.invalidateQueries({ queryKey: ["ocr-preflight", job.id] });
-      toast.success(`Revision ${revision} restored as revision ${result.job.revision}`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not restore revision");
-    }
+  const restoreRevision = (revision: number) => {
+    if (!job) return;
+    setConfirmModal({
+      open: true,
+      title: `Restore Revision ${revision}?`,
+      description: "A new revision will preserve the current history.",
+      confirmLabel: "Restore Revision",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          const result = await apiFetch<{ job: OcrJob }>(
+            `/api/ocr/jobs/${job.id}/revisions/${revision}/restore`,
+            { method: "POST" },
+          );
+          applyJob(result.job);
+          await queryClient.invalidateQueries({ queryKey: ["ocr-revisions", job.id] });
+          await queryClient.invalidateQueries({ queryKey: ["ocr-preflight", job.id] });
+          toast.success(`Revision ${revision} restored as revision ${result.job.revision}`);
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not restore revision");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
   const reprocessOcr = async () => {
@@ -1295,6 +1301,7 @@ function ScannerPage() {
         </div>
       </main>
       <SiteFooter />
+      <ConfirmModal modalState={confirmModal} />
     </div>
   );
 }

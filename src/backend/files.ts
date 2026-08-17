@@ -362,7 +362,7 @@ export async function expandZip(file: StoredInput) {
 }
 
 async function parsePdfText(filePath: string) {
-  const parserModule = await import("pdf-parse");
+  const parserModule = await import("pdf-parse/lib/pdf-parse.js");
   type PdfTextItem = { str?: string; transform?: number[] };
   type PdfPage = {
     getTextContent: (options?: Record<string, unknown>) => Promise<{ items?: PdfTextItem[] }>;

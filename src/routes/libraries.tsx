@@ -25,6 +25,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiFetch, type ApiDocument, type ApiLibrary } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  PromptModal,
+  ConfirmModal,
+  type PromptModalState,
+  type ConfirmModalState,
+} from "@/components/ui/prompt-dialog";
 
 export const Route = createFileRoute("/libraries")({
   head: () => ({ meta: [{ title: "Institution libraries — EduSearch AI" }] }),
@@ -52,6 +58,8 @@ function LibrariesPage() {
   const [documentId, setDocumentId] = useState("");
   const [makePrivate, setMakePrivate] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [promptModal, setPromptModal] = useState<PromptModalState | null>(null);
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
 
   const list = useQuery({
     queryKey: ["libraries"],
@@ -82,19 +90,23 @@ function LibrariesPage() {
     if (id) await queryClient.invalidateQueries({ queryKey: ["library", id] });
   };
 
-  const create = async () => {
+  const createLibrary = async () => {
     if (!name.trim()) return toast.error("Enter a library name");
     setBusy(true);
     try {
-      const result = await apiFetch<{ library: ApiLibrary; joinCode: string }>("/api/libraries", {
+      const result = await apiFetch<{ library: ApiLibrary }>("/api/libraries", {
         method: "POST",
-        body: JSON.stringify({ name, institution, description, visibility }),
+        body: JSON.stringify({
+          name: name.trim(),
+          institution: institution.trim(),
+          description: description.trim(),
+          visibility,
+        }),
       });
-      setNewJoinCode(result.joinCode);
-      setSelectedId(result.library.id);
       setName("");
       setInstitution("");
       setDescription("");
+      setSelectedId(result.library.id);
       toast.success("Library created");
       await refresh(result.library.id);
     } catch (error) {
@@ -104,13 +116,13 @@ function LibrariesPage() {
     }
   };
 
-  const join = async () => {
-    if (!joinCode.trim()) return toast.error("Enter the library join code");
+  const joinByCode = async () => {
+    if (!joinCode.trim()) return toast.error("Enter a join code");
     setBusy(true);
     try {
-      const result = await apiFetch<{ joined: boolean; libraryId: string }>("/api/libraries/join", {
+      const result = await apiFetch<{ libraryId: string }>("/api/libraries/join", {
         method: "POST",
-        body: JSON.stringify({ joinCode }),
+        body: JSON.stringify({ joinCode: joinCode.trim() }),
       });
       setJoinCode("");
       setSelectedId(result.libraryId);
@@ -123,77 +135,94 @@ function LibrariesPage() {
     }
   };
 
-  const rotateCode = async () => {
+  const rotateCode = () => {
     if (!selectedId) return;
-    if (
-      !window.confirm("Generate a new join code? The current code will stop working immediately.")
-    )
-      return;
-    try {
-      const result = await apiFetch<{ joinCode: string }>(
-        `/api/libraries/${encodeURIComponent(selectedId)}/join-code`,
-        { method: "POST" },
-      );
-      setNewJoinCode(result.joinCode);
-      toast.success("A new join code was generated");
-      await refresh();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not rotate join code");
-    }
+    setConfirmModal({
+      open: true,
+      title: "Generate New Join Code",
+      description: "Are you sure? The current code will stop working immediately.",
+      confirmLabel: "Generate Code",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          const result = await apiFetch<{ joinCode: string }>(
+            `/api/libraries/${encodeURIComponent(selectedId)}/join-code`,
+            { method: "POST" },
+          );
+          setNewJoinCode(result.joinCode);
+          toast.success("A new join code was generated");
+          await refresh();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not rotate join code");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
-  const editLibrary = async () => {
+  const editLibrary = () => {
     const current = detail.data?.library;
     if (!current) return;
-    const nextName = window.prompt("Library name", current.name)?.trim();
-    if (!nextName) return;
-    const nextInstitution = window
-      .prompt("Institution (optional)", current.institution || "")
-      ?.trim();
-    if (nextInstitution === undefined) return;
-    const nextDescription = window
-      .prompt("Description (optional)", current.description || "")
-      ?.trim();
-    if (nextDescription === undefined) return;
-    try {
-      await apiFetch(`/api/libraries/${encodeURIComponent(current.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: nextName,
-          institution: nextInstitution,
-          description: nextDescription,
-        }),
-      });
-      toast.success("Library details updated");
-      await refresh();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update library");
-    }
+    setPromptModal({
+      open: true,
+      title: "Edit Library Details",
+      description: "Update the institution library name, institution context, and description.",
+      fields: [
+        { name: "name", label: "Library Name", defaultValue: current.name, required: true },
+        { name: "institution", label: "Institution (optional)", defaultValue: current.institution || "" },
+        { name: "description", label: "Description (optional)", type: "textarea", defaultValue: current.description || "" },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const nextName = values.name?.trim();
+        if (!nextName) return;
+        try {
+          await apiFetch(`/api/libraries/${encodeURIComponent(current.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              name: nextName,
+              institution: values.institution?.trim() || "",
+              description: values.description?.trim() || "",
+            }),
+          });
+          toast.success("Library details updated");
+          await refresh();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not update library");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
-  const deleteLibrary = async () => {
+  const deleteLibrary = () => {
     const current = detail.data?.library;
-    if (
-      !current ||
-      !window.confirm(
-        `Delete “${current.name}”? Member access will be removed and private documents will be archived.`,
-      )
-    )
-      return;
-    try {
-      const result = await apiFetch<{ deleted: boolean; archivedDocuments: number }>(
-        `/api/libraries/${encodeURIComponent(current.id)}`,
-        { method: "DELETE" },
-      );
-      setSelectedId("");
-      setNewJoinCode("");
-      toast.success(
-        `Library deleted${result.archivedDocuments ? `; ${result.archivedDocuments} private document(s) archived` : ""}`,
-      );
-      await refresh("");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not delete library");
-    }
+    if (!current) return;
+    setConfirmModal({
+      open: true,
+      title: `Delete Library "${current.name}"?`,
+      description: "Member access will be removed and private documents will be archived.",
+      destructive: true,
+      confirmLabel: "Delete Library",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          const result = await apiFetch<{ deleted: boolean; archivedDocuments: number }>(
+            `/api/libraries/${encodeURIComponent(current.id)}`,
+            { method: "DELETE" },
+          );
+          setSelectedId("");
+          setNewJoinCode("");
+          toast.success(
+            `Library deleted${result.archivedDocuments ? `; ${result.archivedDocuments} private document(s) archived` : ""}`,
+          );
+          await refresh("");
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not delete library");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
   const toggleVisibility = async () => {
@@ -247,34 +276,54 @@ function LibrariesPage() {
     }
   };
 
-  const removeMember = async (memberId: string) => {
+  const removeMember = (memberId: string) => {
     if (!selectedId) return;
-    if (!window.confirm("Remove this member from the library?")) return;
-    try {
-      await apiFetch(
-        `/api/libraries/${encodeURIComponent(selectedId)}/members/${encodeURIComponent(memberId)}`,
-        { method: "DELETE" },
-      );
-      toast.success("Member removed");
-      await refresh();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not remove member");
-    }
+    setConfirmModal({
+      open: true,
+      title: "Remove Member",
+      description: "Are you sure you want to remove this member from the library?",
+      destructive: true,
+      confirmLabel: "Remove Member",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(
+            `/api/libraries/${encodeURIComponent(selectedId)}/members/${encodeURIComponent(memberId)}`,
+            { method: "DELETE" },
+          );
+          toast.success("Member removed");
+          await refresh();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not remove member");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
-  const removeDocument = async (id: string) => {
+  const removeDocument = (id: string) => {
     if (!selectedId) return;
-    if (!window.confirm("Remove this document from the library?")) return;
-    try {
-      await apiFetch(`/api/libraries/${encodeURIComponent(selectedId)}/documents`, {
-        method: "DELETE",
-        body: JSON.stringify({ documentId: id }),
-      });
-      toast.success("Document removed from the library");
-      await refresh();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not remove document");
-    }
+    setConfirmModal({
+      open: true,
+      title: "Remove Document",
+      description: "Are you sure you want to remove this document from the library?",
+      destructive: true,
+      confirmLabel: "Remove Document",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          await apiFetch(`/api/libraries/${encodeURIComponent(selectedId)}/documents`, {
+            method: "DELETE",
+            body: JSON.stringify({ documentId: id }),
+          });
+          toast.success("Document removed from the library");
+          await refresh();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not remove document");
+        }
+      },
+      onCancel: () => setConfirmModal(null),
+    });
   };
 
   return (
@@ -450,6 +499,8 @@ function LibrariesPage() {
         </div>
       </main>
       <SiteFooter />
+      <PromptModal modalState={promptModal} />
+      <ConfirmModal modalState={confirmModal} />
     </div>
   );
 }

@@ -24,6 +24,7 @@ import { SiteFooter } from "@/components/site-footer";
 import { CompactDocumentCard } from "@/components/document-card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PromptModal, type PromptModalState } from "@/components/ui/prompt-dialog";
 import { documents, getDocument } from "@/lib/edusearch-data";
 import { apiFetch, downloadUrl, type ApiDocument, type DocumentSearchResponse } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
@@ -51,6 +52,7 @@ function DocumentViewer() {
   const [zoom, setZoom] = useState<number>(100);
   const [insideSearch, setInsideSearch] = useState(viewerSearch.q ?? "");
   const [collectionId, setCollectionId] = useState("");
+  const [promptModal, setPromptModal] = useState<PromptModalState | null>(null);
   const fallback = getDocument(id);
   const detail = useQuery({
     queryKey: ["document", id],
@@ -114,17 +116,23 @@ function DocumentViewer() {
   }
 
   const doc = detail.data.document;
+  const related = detail.data.related;
   const safePage = Math.min(Math.max(1, page), Math.max(1, doc.pages));
   const preview = `${downloadUrl(doc.id, true)}#page=${safePage}&zoom=${zoom}`;
 
   const toggleSave = async () => {
+    if (!auth.data?.user) return toast.error("Log in to save documents");
     try {
-      await apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/save`, {
-        method: doc.isSaved ? "DELETE" : "POST",
-      });
-      toast.success(doc.isSaved ? "Removed from saved documents" : "Document saved");
+      if (doc.isSaved) {
+        await apiFetch(`/api/saved/${encodeURIComponent(doc.id)}`, { method: "DELETE" });
+        toast.success("Document removed from saved list");
+      } else {
+        await apiFetch(`/api/saved/${encodeURIComponent(doc.id)}`, { method: "POST" });
+        toast.success("Document saved");
+      }
       await queryClient.invalidateQueries({ queryKey: ["document", id] });
       await queryClient.invalidateQueries({ queryKey: ["saved"] });
+      await queryClient.invalidateQueries({ queryKey: ["home"] });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save document");
     }
@@ -173,25 +181,50 @@ function DocumentViewer() {
     }
   };
 
-  const report = async () => {
-    const selected = window
-      .prompt(
-        "Report reason: copyright, wrong_document, missing_pages, poor_quality, incorrect_ocr, personal_information, malware, or other",
-        "poor_quality",
-      )
-      ?.trim();
-    if (!selected) return;
-    const details =
-      window.prompt("Add useful details for the administrator (optional)")?.trim() ?? "";
-    try {
-      await apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/report`, {
-        method: "POST",
-        body: JSON.stringify({ reason: selected, details }),
-      });
-      toast.success("Report submitted for review");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not submit report");
-    }
+  const report = () => {
+    setPromptModal({
+      open: true,
+      title: "Report Document",
+      fields: [
+        {
+          name: "reason",
+          label: "Report Reason",
+          type: "select",
+          options: [
+            "poor_quality",
+            "copyright",
+            "wrong_document",
+            "missing_pages",
+            "incorrect_ocr",
+            "personal_information",
+            "malware",
+            "other",
+          ],
+          defaultValue: "poor_quality",
+        },
+        {
+          name: "details",
+          label: "Additional Details (optional)",
+          type: "textarea",
+          placeholder: "Describe the issue with this document...",
+        },
+      ],
+      onConfirm: async (values) => {
+        setPromptModal(null);
+        const reason = values.reason || "poor_quality";
+        const details = values.details?.trim() || "";
+        try {
+          await apiFetch(`/api/documents/${encodeURIComponent(doc.id)}/report`, {
+            method: "POST",
+            body: JSON.stringify({ reason, details }),
+          });
+          toast.success("Report submitted for review");
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Could not submit report");
+        }
+      },
+      onCancel: () => setPromptModal(null),
+    });
   };
 
   return (
@@ -496,6 +529,7 @@ function DocumentViewer() {
         </div>
       </main>
       <SiteFooter />
+      <PromptModal modalState={promptModal} />
     </div>
   );
 }
