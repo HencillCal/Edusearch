@@ -447,14 +447,12 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
     const fallbackText = "Academic Document Scan\n(Visual structure reconstructed)";
     const fallbackLines: OcrLine[] = [
       {
-        id: "line-1",
         text: "Academic Document Scan",
         confidence: 70,
         left: Math.round(width * 0.1),
         top: Math.round(height * 0.1),
         width: Math.round(width * 0.8),
         height: 35,
-        words: [],
       },
     ];
     candidates.push({
@@ -881,7 +879,7 @@ type NormalizedOcrOptions = Required<OcrRunOptions>;
 type OcrVariant = { name: string; path: string };
 type OcrCandidate = {
   name: string;
-  engine: "native-tesseract" | "tesseract-js";
+  engine: "native-tesseract" | "tesseract-js" | "visual-analyzer";
   psm: number;
   text: string;
   confidence: number;
