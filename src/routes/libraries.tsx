@@ -397,7 +397,7 @@ function LibrariesPage() {
                   </select>
                 </label>
                 <div className="flex items-end">
-                  <Button className="w-full" disabled={busy} onClick={create}>
+                  <Button className="w-full" disabled={busy} onClick={createLibrary}>
                     {busy && <Loader2 className="size-4 animate-spin" />} Create library
                   </Button>
                 </div>
@@ -429,7 +429,7 @@ function LibrariesPage() {
                   placeholder="EDU-XXXXXXXX"
                   className="h-10 min-w-0 flex-1 rounded-lg border border-border bg-surface px-3 font-mono text-sm outline-none focus:border-brand"
                 />
-                <Button disabled={busy} onClick={join}>
+                <Button disabled={busy} onClick={joinByCode}>
                   Join
                 </Button>
               </div>
