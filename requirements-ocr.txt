@@ -1,0 +1,3 @@
+# Optional but recommended for perspective correction, shadow normalization and mobile-camera scans.
+opencv-python-headless>=4.10,<5
+numpy>=2.0,<3

@@ -1,0 +1,12 @@
+node_modules
+.output
+.git
+.env
+data/*.sqlite
+data/*.sqlite-*
+data/uploads/*
+data/staging/*
+data/ocr/*
+data/exports/*
+
+data/compliance/*

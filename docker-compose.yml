@@ -1,0 +1,36 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATA_DIR: /app/data
+      FIRST_USER_ADMIN: "true"
+      OCR_LANGUAGE: eng+swa
+      OCR_DEFAULT_PROFILE: exam
+      OCR_DEFAULT_QUALITY_MODE: accurate
+      OCR_MAX_PAGES: 40
+      OCR_PAGE_TIMEOUT_MS: 180000
+      OCR_OPENCV_PREPROCESS: "true"
+      OCR_DEWARP_MIN_CONFIDENCE: "0.52"
+      OCR_PREPROCESS_TIMEOUT_MS: 45000
+      OCR_VISION_MAX_LINES: 8
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      clamav:
+        condition: service_started
+
+  clamav:
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    volumes:
+      - clamav-db:/var/lib/clamav
+
+volumes:
+  clamav-db:
