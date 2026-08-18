@@ -38,7 +38,7 @@ export type OcrProfile = "exam" | "notes" | "table" | "mixed";
 export type OcrQualityMode = "fast" | "balanced" | "accurate";
 
 export type OcrPipelineReport = {
-  engine: "native-tesseract" | "tesseract-js" | "pdf-text-layer";
+  engine: "native-tesseract" | "tesseract-js" | "pdf-text-layer" | "visual-analyzer";
   profile: OcrProfile;
   qualityMode: OcrQualityMode;
   language: string;
