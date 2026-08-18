@@ -308,24 +308,13 @@ function DocumentViewer() {
                 </div>
               </div>
 
-              <div className="grid gap-4 p-4 sm:grid-cols-[110px_1fr]">
-                <div className="hidden gap-2 sm:grid">
-                  {Array.from({ length: Math.min(doc.pages, 8) }).map((_, index) => (
-                    <button
-                      key={index}
-                      onClick={() => setPage(index + 1)}
-                      className={`grid h-28 place-items-center rounded-md border text-xs ${safePage === index + 1 ? "border-brand bg-brand-soft text-brand" : "border-border bg-surface text-muted-foreground"}`}
-                    >
-                      Page {index + 1}
-                    </button>
-                  ))}
-                </div>
+              <div className="p-4">
                 <iframe
                   ref={iframeRef}
                   key={preview}
                   title={`${doc.title} preview`}
                   src={preview}
-                  className="h-[72vh] min-h-[620px] w-full rounded-lg border border-border bg-white"
+                  className="h-[72vh] min-h-[620px] w-full rounded-lg border border-border bg-white shadow-inner"
                 />
               </div>
             </div>

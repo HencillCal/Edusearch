@@ -91,7 +91,7 @@ function LibrariesPage() {
   };
 
   const createLibrary = async () => {
-    if (!name.trim()) return toast.error("Enter a library name");
+    if (!name.trim()) return toast.error("Please enter a name for your institution library.");
     setBusy(true);
     try {
       const result = await apiFetch<{ library: ApiLibrary }>("/api/libraries", {
@@ -117,7 +117,7 @@ function LibrariesPage() {
   };
 
   const joinByCode = async () => {
-    if (!joinCode.trim()) return toast.error("Enter a join code");
+    if (!joinCode.trim()) return toast.error("Please enter the join code provided by your library owner.");
     setBusy(true);
     try {
       const result = await apiFetch<{ libraryId: string }>("/api/libraries/join", {
@@ -245,7 +245,8 @@ function LibrariesPage() {
   };
 
   const addDocument = async () => {
-    if (!documentId.trim() || !selectedId) return toast.error("Enter a document ID");
+    if (!documentId.trim()) return toast.error("Please enter or paste a valid Document ID to add it to this library.");
+    if (!selectedId) return toast.error("Please select a library first.");
     try {
       await apiFetch(`/api/libraries/${encodeURIComponent(selectedId)}/documents`, {
         method: "POST",
