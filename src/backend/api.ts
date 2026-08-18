@@ -1867,6 +1867,8 @@ async function publishOcrJob(request: Request, id: string) {
   await writeFile(storagePath, pdfBytes);
   const status = user.role === "admin" ? "published" : "awaiting_review";
   const contributorId = row.user_id ? String(row.user_id) : user.id;
+  const rightsBasis = String(row.rights_basis || "public_domain");
+  const sourceAttribution = String(row.source_attribution || "");
   getDb()
     .prepare(
       `
