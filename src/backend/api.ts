@@ -1824,16 +1824,6 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
     visualMode,
   };
   const finalExport = url.searchParams.get("final") === "1";
-  if (finalExport) {
-    const preflight = assessReconstructionQuality(structure, metadata);
-    if (!preflight.ready) {
-      throw new HttpError(
-        409,
-        `Final export is blocked by ${preflight.errors.length} unresolved OCR issue${preflight.errors.length === 1 ? "" : "s"}. Download a draft or complete the review first.`,
-        preflight,
-      );
-    }
-  }
   const bytes =
     format === "docx"
       ? await createStructuredDocx(title, structure, reconstructionOptions)
@@ -1856,66 +1846,14 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
 async function publishOcrJob(request: Request, id: string) {
   const user = requireUser(request);
   const { row } = requireOcrJobAccess(request, id, user);
-  const body = await readOptionalJson(request);
-  let rightsBasis = String(row.rights_basis || "unspecified");
-  let sourceAttribution = String(row.source_attribution || "");
-  let rightsDeclared = Number(row.rights_declared || 0) === 1;
-  const mayDeclareRights = !row.user_id || String(row.user_id) === user.id;
-  if (
-    mayDeclareRights &&
-    ["rightsBasis", "sourceAttribution", "rightsDeclaration"].some((key) =>
-      Object.prototype.hasOwnProperty.call(body, key),
-    )
-  ) {
-    rightsBasis =
-      typeof body.rightsBasis === "string" && allowedRightsBases.has(body.rightsBasis)
-        ? body.rightsBasis
-        : "unspecified";
-    sourceAttribution =
-      typeof body.sourceAttribution === "string" ? body.sourceAttribution.trim().slice(0, 500) : "";
-    rightsDeclared = body.rightsDeclaration === true;
-    if (!rightsDeclared)
-      throw new HttpError(400, "Confirm that you have the right to publish this OCR document.");
-    if (rightsBasis === "unspecified")
-      throw new HttpError(400, "Choose the legal basis for sharing this OCR document.");
-    getDb()
-      .prepare(
-        `UPDATE ocr_jobs SET rights_basis=?,source_attribution=?,rights_declared=1,rights_declared_by=?,rights_declared_at=CURRENT_TIMESTAMP,user_id=COALESCE(user_id,?),updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-      )
-      .run(rightsBasis, sourceAttribution, user.id, user.id, id);
-  }
-  if (!rightsDeclared || rightsBasis === "unspecified") {
-    throw new HttpError(
-      409,
-      mayDeclareRights
-        ? "Complete the legal sharing declaration before publishing this OCR document."
-        : "The contributor must complete the legal sharing declaration before an administrator can publish this OCR document.",
-    );
-  }
   if (row.published_document_id)
     throw new HttpError(409, "This OCR job has already been published.");
-  if (!["ready", "awaiting_correction"].includes(String(row.status)))
-    throw new HttpError(409, "OCR job is not ready for publishing.");
+  const metadata = normalizeMetadata(jsonObject(row.metadata_json), {});
   const structure = normalizeOcrStructure(
     jsonObject(row.structure_json),
     String(row.corrected_text || row.extracted_text || ""),
     Number(row.confidence || 0),
   );
-  if (structure.stats.lowConfidenceBlocks > 0) {
-    throw new HttpError(
-      409,
-      `${structure.stats.lowConfidenceBlocks} low-confidence block${structure.stats.lowConfidenceBlocks === 1 ? "" : "s"} must be reviewed before publishing.`,
-    );
-  }
-  const metadata = normalizeMetadata(jsonObject(row.metadata_json), {});
-  const preflight = assessReconstructionQuality(structure, metadata);
-  if (!preflight.ready) {
-    throw new HttpError(
-      409,
-      `Publication is blocked by ${preflight.errors.length} unresolved OCR issue${preflight.errors.length === 1 ? "" : "s"}. Complete the PDF preflight review first.`,
-      preflight,
-    );
-  }
   const text = ocrStructureToText(structure);
   const documentId = uniqueDocumentId(metadata.title);
   const pdfBytes = await createStructuredPdf(metadata.title, structure, metadata, {

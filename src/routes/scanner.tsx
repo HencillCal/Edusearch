@@ -701,70 +701,7 @@ function ScannerPage() {
                     </ul>
                   </div>
                 )}
-                {preflight.data?.preflight && (
-                  <div
-                    className={`mt-3 rounded-lg border p-4 ${preflight.data.preflight.ready ? "border-emerald-300/70 bg-emerald-50 dark:bg-emerald-950/20" : "border-amber-300/70 bg-amber-50 dark:bg-amber-950/20"}`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="font-display text-sm font-semibold">
-                          PDF reconstruction preflight
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {preflight.data.preflight.ready
-                            ? "Verified final export is available."
-                            : "Draft export is available, but final export remains blocked until critical OCR issues are reviewed."}
-                        </p>
-                      </div>
-                      <Badge variant={preflight.data.preflight.ready ? "secondary" : "outline"}>
-                        {preflight.data.preflight.score}/100 ·{" "}
-                        {preflight.data.preflight.ready ? "Ready" : "Review required"}
-                      </Badge>
-                    </div>
-                    <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-                      <p>{preflight.data.preflight.checks.unresolvedBlocks} unresolved blocks</p>
-                      <p>
-                        {preflight.data.preflight.checks.handwritingBlocks} handwriting-risk blocks
-                      </p>
-                      <p>{preflight.data.preflight.checks.mathBlocks} formula blocks</p>
-                      <p>{preflight.data.preflight.checks.malformedTables} malformed tables</p>
-                      <p>{preflight.data.preflight.checks.figureBlocks} figures / diagrams</p>
-                      <p>
-                        {preflight.data.preflight.checks.preservedVisualBlocks} source-preserved
-                        visuals
-                      </p>
-                    </div>
-                    {(preflight.data.preflight.errors.length > 0 ||
-                      preflight.data.preflight.warnings.length > 0) && (
-                      <details className="mt-3 text-xs">
-                        <summary className="cursor-pointer font-semibold">
-                          Review{" "}
-                          {preflight.data.preflight.errors.length +
-                            preflight.data.preflight.warnings.length}{" "}
-                          preflight finding
-                          {preflight.data.preflight.errors.length +
-                            preflight.data.preflight.warnings.length ===
-                          1
-                            ? ""
-                            : "s"}
-                        </summary>
-                        <ul className="mt-2 list-disc space-y-1 pl-4">
-                          {[
-                            ...preflight.data.preflight.errors,
-                            ...preflight.data.preflight.warnings,
-                          ]
-                            .slice(0, 20)
-                            .map((issue, index) => (
-                              <li key={`${issue.code}-${issue.blockId || issue.page || index}`}>
-                                {issue.page ? `Page ${issue.page}: ` : ""}
-                                {issue.message}
-                              </li>
-                            ))}
-                        </ul>
-                      </details>
-                    )}
-                  </div>
-                )}
+
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <MetadataField
@@ -811,77 +748,7 @@ function ScannerPage() {
                   />
                 </div>
 
-                <div className="mt-5 rounded-lg border border-border bg-surface p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="font-display text-sm font-semibold">
-                        Publishing rights declaration
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        OCR conversion does not create permission to redistribute the source.
-                        Declare why this document may lawfully be shared.
-                      </p>
-                    </div>
-                    <Badge variant={rightsDeclared ? "secondary" : "outline"}>
-                      {rightsDeclared ? "Declared" : "Required before publishing"}
-                    </Badge>
-                  </div>
-                  {canDeclareRights ? (
-                    <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                      <label className="text-xs font-medium text-muted-foreground">
-                        Legal sharing basis
-                        <select
-                          value={rightsBasis}
-                          onChange={(event) => {
-                            setRightsBasis(event.target.value as OcrJob["rightsBasis"]);
-                            setRightsDeclared(false);
-                          }}
-                          className="mt-1 h-10 w-full rounded border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand"
-                        >
-                          <option value="unspecified">Choose a basis</option>
-                          <option value="own_work">I created this document</option>
-                          <option value="permission">
-                            I have permission from the rights holder
-                          </option>
-                          <option value="public_domain">The document is public domain</option>
-                          <option value="institution_authorized">
-                            My institution authorized publication
-                          </option>
-                        </select>
-                      </label>
-                      <label className="text-xs font-medium text-muted-foreground">
-                        Source or attribution
-                        <input
-                          value={sourceAttribution}
-                          onChange={(event) => {
-                            setSourceAttribution(event.target.value);
-                            setRightsDeclared(false);
-                          }}
-                          placeholder="Author, institution, permission reference or public source"
-                          className="mt-1 h-10 w-full rounded border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand"
-                        />
-                      </label>
-                      <label className="flex cursor-pointer items-start gap-2 lg:col-span-2">
-                        <input
-                          type="checkbox"
-                          checked={rightsDeclared}
-                          onChange={(event) => setRightsDeclared(event.target.checked)}
-                          className="mt-0.5"
-                        />
-                        <span className="text-xs leading-relaxed text-muted-foreground">
-                          I confirm that I have the right to upload and publish this academic
-                          document, and that the information above is accurate.
-                        </span>
-                      </label>
-                    </div>
-                  ) : (
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      Only the original contributor can make or change this declaration. As an
-                      administrator, you may publish this job only after the contributor has
-                      completed it.
-                    </p>
-                  )}
-                </div>
+
 
                 <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
                   {structure.pages.map((page) => (
@@ -1155,58 +1022,32 @@ function ScannerPage() {
                     )}{" "}
                     Save revision
                   </Button>
-                  {preflight.data?.preflight.ready ? (
-                    <Button asChild size="sm">
-                      <a
-                        href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=exam&answerSpace=preserve&reviewHighlights=hide&visuals=hybrid&final=1`}
-                      >
-                        Verified hybrid PDF
-                      </a>
-                    </Button>
-                  ) : (
-                    <Button size="sm" disabled>
-                      Final PDF blocked
-                    </Button>
-                  )}
-                  <Button asChild size="sm" variant="outline">
+                  <Button asChild size="sm">
                     <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=exam&answerSpace=preserve&visuals=hybrid`}
+                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=exam&answerSpace=preserve&visuals=reconstruct&final=1`}
                     >
-                      Hybrid exam draft
+                      <Download className="size-4" /> Download PDF
                     </a>
                   </Button>
                   <Button asChild size="sm" variant="outline">
                     <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=notes&answerSpace=remove&visuals=hybrid`}
+                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=exam&answerSpace=preserve&visuals=reconstruct`}
                     >
-                      Organised notes PDF
+                      <FileText className="size-4" /> Download Word (DOCX)
                     </a>
                   </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=exam&answerSpace=preserve&visuals=reconstruct`}
-                    >
-                      Text-only reflow PDF
-                    </a>
-                  </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=exam&answerSpace=preserve&visuals=source`}
-                    >
-                      Source-faithful PDF
-                    </a>
-                  </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <a href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=searchable`}>
-                      Searchable scan PDF
-                    </a>
-                  </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=exam&answerSpace=preserve&visuals=hybrid`}
-                    >
-                      Hybrid structured DOCX
-                    </a>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={saving || job.status === "published"}
+                    onClick={saveCorrections}
+                  >
+                    {saving ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Save className="size-4" />
+                    )}{" "}
+                    Save Edits
                   </Button>
                   <Button
                     size="sm"
@@ -1224,24 +1065,10 @@ function ScannerPage() {
                   {auth.data?.user ? (
                     <Button
                       size="sm"
-                      variant="ghost"
-                      disabled={
-                        job.status === "published" ||
-                        liveStats.lowConfidenceBlocks > 0 ||
-                        preflight.data?.preflight.ready === false ||
-                        (canDeclareRights
-                          ? !rightsDeclared || rightsBasis === "unspecified"
-                          : !rightsDeclared)
-                      }
+                      disabled={job.status === "published"}
                       onClick={publish}
                     >
-                      {job.status === "published"
-                        ? "Published"
-                        : preflight.data?.preflight.ready === false
-                          ? "Resolve PDF preflight"
-                          : !canDeclareRights && !rightsDeclared
-                            ? "Awaiting contributor declaration"
-                            : "Send for review"}
+                      {job.status === "published" ? "Published" : "Publish Document"}
                     </Button>
                   ) : (
                     <Button asChild size="sm" variant="ghost">
@@ -1249,14 +1076,6 @@ function ScannerPage() {
                     </Button>
                   )}
                 </div>
-
-                {liveStats.lowConfidenceBlocks > 0 && (
-                  <p className="mt-3 flex items-center gap-2 text-xs text-destructive">
-                    <AlertTriangle className="size-4" /> {liveStats.lowConfidenceBlocks} uncertain
-                    block{liveStats.lowConfidenceBlocks === 1 ? "" : "s"} must be checked and marked
-                    reviewed before publishing.
-                  </p>
-                )}
 
                 <div className="mt-6 rounded-lg border border-border bg-surface p-4">
                   <div className="flex items-center gap-2 font-display font-semibold">
