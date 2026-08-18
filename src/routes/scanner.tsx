@@ -833,7 +833,7 @@ function ScannerPage() {
                               }
                               className="mt-2 min-h-24 w-full resize-y rounded border border-border bg-surface p-2 text-sm leading-relaxed outline-none focus:border-brand"
                             />
-                          </div>        </div>
+                          </div>
                         ))}
                         {currentPage?.blocks.length === 0 && (
                           <p className="py-10 text-center text-sm text-muted-foreground">
