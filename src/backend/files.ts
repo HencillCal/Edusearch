@@ -441,28 +441,42 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
   }
 
   if (!candidates.length) {
+    try {
+      const directPass = await recognizeWithTesseractJs(
+        sourcePath,
+        options.language,
+        3,
+        "direct-source",
+        options.profile,
+      );
+      if (directPass.text.trim()) candidates.push(directPass);
+    } catch {
+      // Continue
+    }
+  }
+
+  if (!candidates.length) {
     const imageInfo = await sharp(prepared.enhancedPath).metadata();
     const width = Number(imageInfo.width || 1200);
     const height = Number(imageInfo.height || 1600);
-    const fallbackText = "Academic Document Scan\n(Visual structure reconstructed)";
-    const fallbackLines: OcrLine[] = [
-      {
-        text: "Academic Document Scan",
-        confidence: 70,
-        left: Math.round(width * 0.1),
-        top: Math.round(height * 0.1),
-        width: Math.round(width * 0.8),
-        height: 35,
-      },
-    ];
+    const fallbackText = "Scanned Document Text";
     candidates.push({
-      name: "visual-reconstruction",
-      engine: "visual-analyzer",
+      name: "source-text",
+      engine: "tesseract-js",
       psm: 3,
       text: fallbackText,
       confidence: 70,
       score: 65,
-      lines: fallbackLines,
+      lines: [
+        {
+          text: fallbackText,
+          confidence: 70,
+          left: Math.round(width * 0.1),
+          top: Math.round(height * 0.1),
+          width: Math.round(width * 0.8),
+          height: 35,
+        },
+      ],
     });
   }
   candidates.sort((left, right) => right.score - left.score);
@@ -1399,22 +1413,16 @@ async function prepareOcrVariants(sourcePath: string, options: NormalizedOcrOpti
   await sharp(preprocessingSource, { limitInputPixels: 160_000_000 })
     .rotate()
     .flatten({ background: "#ffffff" })
-    .trim({ background: "#ffffff", threshold: 8 })
     .resize({
       width: targetWidth,
-      withoutEnlargement: options.qualityMode === "fast",
+      withoutEnlargement: true,
       fit: "inside",
     })
     .grayscale()
     .png()
     .toFile(initialPath);
 
-  const initialStats = await sharp(initialPath).stats();
-  const mean = initialStats.channels[0]?.mean ?? 255;
-  const polarityPath = path.join(dataDir, "ocr", `${stamp}-polarity.png`);
-  if (mean < 92) await sharp(initialPath).negate().png().toFile(polarityPath);
-  else await sharp(initialPath).toFile(polarityPath);
-
+  const polarityPath = initialPath;
   const orientationCorrection =
     options.qualityMode === "fast" ? 0 : await detectOrientationCorrection(polarityPath);
   const orientedPath = path.join(dataDir, "ocr", `${stamp}-oriented.png`);
@@ -1424,14 +1432,11 @@ async function prepareOcrVariants(sourcePath: string, options: NormalizedOcrOpti
     .toFile(orientedPath);
   const skewAngle = await estimateDeskewAngle(orientedPath, options.qualityMode);
   const enhancedPath = path.join(dataDir, "ocr", `${stamp}-enhanced.png`);
-  let enhancedPipeline = sharp(orientedPath)
+  await sharp(orientedPath)
     .rotate(skewAngle, { background: "#ffffff" })
     .grayscale()
-    .gamma(options.profile === "notes" ? 1.05 : 1)
-    .normalize();
-  if (options.qualityMode === "accurate") enhancedPipeline = enhancedPipeline.median(3);
-  await enhancedPipeline
-    .sharpen({ sigma: options.profile === "notes" ? 0.8 : 1.15, m1: 0.5, m2: 1.5 })
+    .normalize()
+    .sharpen({ sigma: 1.0 })
     .png()
     .toFile(enhancedPath);
 

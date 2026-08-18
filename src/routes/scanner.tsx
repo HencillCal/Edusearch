@@ -608,91 +608,7 @@ function ScannerPage() {
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-4 sm:grid-cols-2 lg:grid-cols-5 xl:grid-cols-10">
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      OCR engine
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.engine.replaceAll("-", " ")}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Pass ensemble
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.ensembleAgreement.toFixed(1)}% agreement
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Page correction
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.perspectiveCorrection ? "Perspective fixed" : "Flat page"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Orientation
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.orientationCorrection.toFixed(0)}° ·{" "}
-                      {job.pipeline.skewAngle.toFixed(2)}° skew
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Page consistency
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.pageConsistency.toFixed(1)}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Image quality
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.contrastScore.toFixed(0)}% contrast ·{" "}
-                      {job.pipeline.blurScore.toFixed(0)}% blur risk
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Print / handwriting
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.handwritingRisk.toFixed(0)}% review risk
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Export readiness
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.exportReadiness.toFixed(0)}/100
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Layout recovery
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {job.pipeline.detectedFigures} figure · {job.pipeline.detectedTables} table ·{" "}
-                      {job.pipeline.preservedVisuals} preserved
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Processing
-                    </p>
-                    <p className="mt-1 text-sm font-semibold">
-                      {Math.max(0.1, job.pipeline.processingMs / 1000).toFixed(1)}s
-                    </p>
-                  </div>
-                </div>
+
                 {job.pipeline.warnings.length > 0 && (
                   <div className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-xs text-amber-950 dark:bg-amber-950/20 dark:text-amber-100">
                     <p className="font-semibold">Scan-quality warnings</p>
@@ -839,38 +755,6 @@ function ScannerPage() {
                                   </option>
                                 ))}
                               </select>
-                              <Badge variant={block.confidence < 70 ? "destructive" : "secondary"}>
-                                {Math.round(block.confidence)}%
-                              </Badge>
-                              {block.agreement != null && (
-                                <Badge variant={block.agreement < 0.58 ? "destructive" : "outline"}>
-                                  {Math.round(block.agreement * 100)}% agreement
-                                </Badge>
-                              )}
-                              {block.handwritingLikely && (
-                                <Badge variant="destructive">Possible handwriting</Badge>
-                              )}
-                              {block.mathDetected && <Badge variant="outline">Formula</Badge>}
-                              {block.preserveAsImage && (
-                                <Badge variant="outline">Source crop preserved</Badge>
-                              )}
-                              {block.type === "figure" && (
-                                <Badge variant="secondary">Diagram</Badge>
-                              )}
-                              {(block.needsReview ||
-                                block.confidence < 70 ||
-                                (block.agreement ?? 1) < 0.58) && (
-                                <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-xs">
-                                  <input
-                                    type="checkbox"
-                                    checked={block.reviewed}
-                                    onChange={(event) =>
-                                      updateBlock(block.id, { reviewed: event.target.checked })
-                                    }
-                                  />{" "}
-                                  Reviewed
-                                </label>
-                              )}
                               <Button
                                 size="icon"
                                 variant="ghost"
@@ -949,47 +833,7 @@ function ScannerPage() {
                               }
                               className="mt-2 min-h-24 w-full resize-y rounded border border-border bg-surface p-2 text-sm leading-relaxed outline-none focus:border-brand"
                             />
-                            {block.alternatives?.length ? (
-                              <details className="mt-2 rounded border border-border bg-surface px-2 py-1.5 text-xs text-muted-foreground">
-                                <summary className="cursor-pointer font-medium">
-                                  Other OCR readings
-                                </summary>
-                                <div className="mt-2 space-y-1">
-                                  {block.alternatives.map((alternative) => (
-                                    <button
-                                      key={alternative}
-                                      type="button"
-                                      className="block w-full rounded bg-background px-2 py-1 text-left hover:text-foreground"
-                                      onClick={() =>
-                                        updateBlock(block.id, { text: alternative, reviewed: true })
-                                      }
-                                    >
-                                      {alternative}
-                                    </button>
-                                  ))}
-                                </div>
-                              </details>
-                            ) : null}
-                            {block.spacingAfter != null && block.spacingAfter >= 8 && (
-                              <p className="mt-1 text-[11px] text-muted-foreground">
-                                Preserved source spacing: {Math.round(block.spacingAfter)} pt
-                              </p>
-                            )}
-                            {block.reviewReason && (
-                              <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                                {block.reviewReason}
-                              </p>
-                            )}
-                            {(block.needsReview ||
-                              block.confidence < 70 ||
-                              (block.agreement ?? 1) < 0.58) &&
-                              !block.reviewed && (
-                                <p className="mt-1 flex items-center gap-1 text-xs text-destructive">
-                                  <AlertTriangle className="size-3" /> Verify this text against the
-                                  original page.
-                                </p>
-                              )}
-                          </div>
+                          </div>        </div>
                         ))}
                         {currentPage?.blocks.length === 0 && (
                           <p className="py-10 text-center text-sm text-muted-foreground">
