@@ -74,7 +74,7 @@ function ScannerPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { job: requestedJobId } = Route.useSearch();
-  const [stage, setStage] = useState<"idle" | "processing" | "done">(
+  const [stage, setStage] = useState<"idle" | "processing" | "done" | "failed">(
     requestedJobId ? "processing" : "idle",
   );
   const [job, setJob] = useState<OcrJob | null>(null);
@@ -101,6 +101,10 @@ function ScannerPage() {
       apiFetch<{ job: OcrJob }>(`/api/ocr/jobs/${encodeURIComponent(requestedJobId || "")}`),
     enabled: typeof window !== "undefined" && Boolean(requestedJobId),
     retry: false,
+    refetchInterval: (query) => {
+      const current = query.state.data as { job?: OcrJob } | undefined;
+      return current?.job?.status === "processing" ? 1500 : false;
+    },
   });
   const recentJobs = useQuery({
     queryKey: ["ocr-jobs", "mine"],
@@ -123,7 +127,11 @@ function ScannerPage() {
       apiFetch<{ preflight: OcrPreflight }>(
         `/api/ocr/jobs/${encodeURIComponent(job?.id || "")}/preflight`,
       ),
-    enabled: typeof window !== "undefined" && Boolean(job?.id),
+    enabled:
+      typeof window !== "undefined" &&
+      Boolean(job?.id) &&
+      job?.status !== "processing" &&
+      job?.status !== "failed",
     retry: false,
   });
 
@@ -144,7 +152,7 @@ function ScannerPage() {
 
   const applyJob = (nextJob: OcrJob) => {
     setJob(nextJob);
-    setStructure(cloneStructure(nextJob.structure));
+    setStructure(nextJob.structure.pages.length ? cloneStructure(nextJob.structure) : null);
     setMetadata({ ...nextJob.metadata });
     setRawText(nextJob.correctedText || nextJob.extractedText);
     setRightsBasis(nextJob.rightsBasis || "unspecified");
@@ -156,7 +164,13 @@ function ScannerPage() {
     setSelectedPage((current) =>
       Math.min(Math.max(1, current), Math.max(1, nextJob.structure.pages.length)),
     );
-    setStage("done");
+    setStage(
+      nextJob.status === "failed"
+        ? "failed"
+        : nextJob.status === "processing"
+          ? "processing"
+          : "done",
+    );
   };
 
   const chooseFile = async (selected: File) => {
@@ -177,7 +191,7 @@ function ScannerPage() {
       await navigate({ to: "/scanner", search: { job: result.job.id }, replace: true });
       await queryClient.invalidateQueries({ queryKey: ["ocr-jobs"] });
       toast.success(
-        `OCR reconstruction complete · ${Math.round(result.job.qualityScore)}/100 quality score`,
+        "Upload received. OCR is running in the background; this page will update when the reconstruction is ready.",
       );
     } catch (error) {
       setStage("idle");
@@ -252,6 +266,63 @@ function ScannerPage() {
           })),
         },
     );
+  };
+
+  const splitBlock = (blockId: string) => {
+    setStructure((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        pages: current.pages.map((page) => {
+          const index = page.blocks.findIndex((block) => block.id === blockId);
+          if (index < 0) return page;
+          const block = page.blocks[index];
+          const midpoint = Math.floor(block.text.length / 2);
+          const splitAt =
+            block.text.lastIndexOf("\n", midpoint) > 0
+              ? block.text.lastIndexOf("\n", midpoint)
+              : block.text.lastIndexOf(" ", midpoint);
+          if (splitAt < 1 || splitAt >= block.text.length - 1) return page;
+          const first = block.text.slice(0, splitAt).trim();
+          const second = block.text.slice(splitAt).trim();
+          const nextBlock: OcrBlock = {
+            ...block,
+            id: `${block.id}-split-${Date.now()}`,
+            text: second,
+            order: block.order + 1,
+            reviewed: false,
+          };
+          const blocks = [...page.blocks];
+          blocks[index] = { ...block, text: first, reviewed: false };
+          blocks.splice(index + 1, 0, nextBlock);
+          return { ...page, blocks: blocks.map((item, order) => ({ ...item, order })) };
+        }),
+      };
+    });
+  };
+
+  const mergeBlockWithNext = (blockId: string) => {
+    setStructure((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        pages: current.pages.map((page) => {
+          const index = page.blocks.findIndex((block) => block.id === blockId);
+          if (index < 0 || index >= page.blocks.length - 1) return page;
+          const currentBlock = page.blocks[index];
+          const next = page.blocks[index + 1];
+          if (next.type !== currentBlock.type && currentBlock.type !== "paragraph") return page;
+          const blocks = page.blocks.filter((_, itemIndex) => itemIndex !== index + 1);
+          blocks[index] = {
+            ...currentBlock,
+            text: `${currentBlock.text.trim()} ${next.text.trim()}`.replace(/\s+/g, " "),
+            marks: currentBlock.marks ?? next.marks,
+            reviewed: false,
+          };
+          return { ...page, blocks: blocks.map((item, order) => ({ ...item, order })) };
+        }),
+      };
+    });
   };
 
   const addBlock = () => {
@@ -397,6 +468,7 @@ function ScannerPage() {
   };
 
   const sourceIsPdf = job?.originalFilename.toLowerCase().endsWith(".pdf");
+  const exportTemplate = profile === "notes" ? "notes" : profile === "table" ? "compact" : "exam";
   const enhancedPageUrl = job?.enhancedPaths[selectedPage - 1];
 
   return (
@@ -572,7 +644,26 @@ function ScannerPage() {
               <div className="grid min-h-[520px] place-items-center text-center">
                 <div>
                   <Loader2 className="mx-auto size-9 animate-spin text-brand" />
-                  <p className="mt-4 font-medium">Enhancing pages and reconstructing the exam…</p>
+                  <p className="mt-4 font-medium">{formatOcrStage(job?.stage)}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    The backend is processing the source image. No placeholder text is shown while
+                    OCR runs.
+                  </p>
+                </div>
+              </div>
+            )}
+            {stage === "failed" && job && (
+              <div className="grid min-h-[520px] place-items-center text-center">
+                <div className="max-w-xl rounded-xl border border-destructive/40 bg-destructive/5 p-6">
+                  <AlertTriangle className="mx-auto size-9 text-destructive" />
+                  <p className="mt-4 font-display text-lg font-semibold">OCR failed</p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {job.errorMessage || "The source text could not be extracted."}
+                  </p>
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Stage: {formatOcrStage(job.stage)}. The original upload remains available for
+                    another attempt.
+                  </p>
                 </div>
               </div>
             )}
@@ -608,7 +699,6 @@ function ScannerPage() {
                   </div>
                 </div>
 
-
                 {job.pipeline.warnings.length > 0 && (
                   <div className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-xs text-amber-950 dark:bg-amber-950/20 dark:text-amber-100">
                     <p className="font-semibold">Scan-quality warnings</p>
@@ -619,7 +709,6 @@ function ScannerPage() {
                     </ul>
                   </div>
                 )}
-
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <MetadataField
@@ -665,8 +754,6 @@ function ScannerPage() {
                     onChange={(value) => setMetadata({ ...metadata, language: value })}
                   />
                 </div>
-
-
 
                 <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
                   {structure.pages.map((page) => (
@@ -740,6 +827,17 @@ function ScannerPage() {
                             className={`rounded-lg border p-3 ${(block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) && !block.reviewed ? "border-destructive/60 bg-destructive/5" : "border-border bg-background"}`}
                           >
                             <div className="flex flex-wrap items-center gap-2">
+                              <Badge
+                                variant={
+                                  block.confidence >= 90
+                                    ? "secondary"
+                                    : block.confidence >= 70
+                                      ? "outline"
+                                      : "destructive"
+                                }
+                              >
+                                {Math.round(block.confidence)}% {confidenceLabel(block.confidence)}
+                              </Badge>
                               <select
                                 value={block.type}
                                 onChange={(event) =>
@@ -774,6 +872,34 @@ function ScannerPage() {
                                 <ChevronDown className="size-3.5" />
                               </Button>
                               <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => splitBlock(block.id)}
+                                aria-label="Split block"
+                              >
+                                Split
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={index === currentPage.blocks.length - 1}
+                                onClick={() => mergeBlockWithNext(block.id)}
+                                aria-label="Merge block with next"
+                              >
+                                Merge
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant={block.reviewed ? "secondary" : "ghost"}
+                                onClick={() => updateBlock(block.id, { reviewed: !block.reviewed })}
+                                aria-label={
+                                  block.reviewed ? "Unmark block verified" : "Mark block verified"
+                                }
+                                title={block.reviewed ? "Unmark verified" : "Mark verified"}
+                              >
+                                <CheckCircle2 className="size-3.5" />
+                              </Button>
+                              <Button
                                 size="icon"
                                 variant="ghost"
                                 onClick={() => deleteBlock(block.id)}
@@ -804,6 +930,23 @@ function ScannerPage() {
                                     onChange={(event) =>
                                       updateBlock(block.id, {
                                         marks: event.target.value
+                                          ? Number(event.target.value)
+                                          : undefined,
+                                      })
+                                    }
+                                    className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-sm text-foreground outline-none focus:border-brand"
+                                  />
+                                </label>
+                                <label className="text-xs text-muted-foreground">
+                                  Answer lines
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={12}
+                                    value={block.answerLines ?? ""}
+                                    onChange={(event) =>
+                                      updateBlock(block.id, {
+                                        answerLines: event.target.value
                                           ? Number(event.target.value)
                                           : undefined,
                                       })
@@ -868,18 +1011,41 @@ function ScannerPage() {
                     )}{" "}
                     Save revision
                   </Button>
-                  <Button asChild size="sm">
+                  <Button asChild size="sm" variant="outline">
                     <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=exam&answerSpace=preserve&visuals=reconstruct&final=1`}
+                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid`}
                     >
-                      <Download className="size-4" /> Download PDF
+                      <Download className="size-4" /> Download OCR Draft PDF
+                    </a>
+                  </Button>
+                  <Button
+                    asChild
+                    size="sm"
+                    disabled={!preflight.data?.preflight.ready || job.status === "published"}
+                  >
+                    <a
+                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid&final=1`}
+                    >
+                      <CheckCircle2 className="size-4" /> Download Verified PDF
                     </a>
                   </Button>
                   <Button asChild size="sm" variant="outline">
                     <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=exam&answerSpace=preserve&visuals=reconstruct`}
+                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid`}
                     >
-                      <FileText className="size-4" /> Download Word (DOCX)
+                      <FileText className="size-4" /> Download OCR Draft DOCX
+                    </a>
+                  </Button>
+                  <Button
+                    asChild
+                    size="sm"
+                    variant="outline"
+                    disabled={!preflight.data?.preflight.ready || job.status === "published"}
+                  >
+                    <a
+                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid&final=1`}
+                    >
+                      <FileText className="size-4" /> Download Verified DOCX
                     </a>
                   </Button>
                   <Button
@@ -909,11 +1075,7 @@ function ScannerPage() {
                     Reprocess OCR
                   </Button>
                   {auth.data?.user ? (
-                    <Button
-                      size="sm"
-                      disabled={job.status === "published"}
-                      onClick={publish}
-                    >
+                    <Button size="sm" disabled={job.status === "published"} onClick={publish}>
                       {job.status === "published" ? "Published" : "Publish Document"}
                     </Button>
                   ) : (
@@ -990,6 +1152,28 @@ function MetadataField({
       />
     </label>
   );
+}
+
+function confidenceLabel(value: number) {
+  if (value >= 90) return "high confidence";
+  if (value >= 70) return "review recommended";
+  return "review required";
+}
+
+function formatOcrStage(stage?: string) {
+  const labels: Record<string, string> = {
+    uploaded: "Upload received",
+    preprocessing: "Correcting orientation, perspective and page lighting…",
+    ocr_running: "Extracting real text and word coordinates…",
+    ocr_completed: "OCR text extracted; validating recognition…",
+    layout_analysis: "Analysing columns, tables, figures and reading order…",
+    reconstructing: "Reconstructing questions, instructions and marks…",
+    awaiting_review: "OCR complete — review highlighted blocks",
+    verified: "OCR complete — reconstruction ready",
+    failed: "OCR failed",
+    published: "Published to EduSearch AI",
+  };
+  return labels[stage || ""] || "Processing OCR…";
 }
 
 function cloneStructure(structure: OcrStructure): OcrStructure {

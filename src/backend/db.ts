@@ -90,6 +90,10 @@ export function initializeDatabase() {
       downloads INTEGER NOT NULL DEFAULT 0,
       rating REAL NOT NULL DEFAULT 0,
       uploaded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      original_source_path TEXT,
+      docx_storage_path TEXT,
+      structure_json TEXT NOT NULL DEFAULT '{}',
+      ocr_job_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -282,6 +286,111 @@ export function initializeDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_ocr_revisions_job ON ocr_revisions(job_id, revision DESC);
 
+    CREATE TABLE IF NOT EXISTS ocr_pages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL REFERENCES ocr_jobs(id) ON DELETE CASCADE,
+      page_number INTEGER NOT NULL,
+      width INTEGER NOT NULL DEFAULT 0,
+      height INTEGER NOT NULL DEFAULT 0,
+      enhanced_path TEXT,
+      raw_text TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0,
+      diagnostics_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, page_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_pages_job ON ocr_pages(job_id, page_number);
+
+    CREATE TABLE IF NOT EXISTS ocr_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_id INTEGER NOT NULL REFERENCES ocr_pages(id) ON DELETE CASCADE,
+      line_number INTEGER NOT NULL,
+      text TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0,
+      x INTEGER NOT NULL DEFAULT 0,
+      y INTEGER NOT NULL DEFAULT 0,
+      width INTEGER NOT NULL DEFAULT 0,
+      height INTEGER NOT NULL DEFAULT 0,
+      agreement REAL NOT NULL DEFAULT 1,
+      needs_review INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(page_id, line_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_lines_page ON ocr_lines(page_id, line_number);
+
+    CREATE TABLE IF NOT EXISTS ocr_words (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      line_id INTEGER NOT NULL REFERENCES ocr_lines(id) ON DELETE CASCADE,
+      word_number INTEGER NOT NULL,
+      text TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0,
+      x INTEGER NOT NULL DEFAULT 0,
+      y INTEGER NOT NULL DEFAULT 0,
+      width INTEGER NOT NULL DEFAULT 0,
+      height INTEGER NOT NULL DEFAULT 0,
+      page_number INTEGER NOT NULL DEFAULT 1,
+      line_number INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(line_id, word_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_words_line ON ocr_words(line_id, word_number);
+
+    CREATE TABLE IF NOT EXISTS ocr_blocks (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL REFERENCES ocr_jobs(id) ON DELETE CASCADE,
+      page_number INTEGER NOT NULL,
+      block_order INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      text TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0,
+      needs_review INTEGER NOT NULL DEFAULT 0,
+      reviewed INTEGER NOT NULL DEFAULT 0,
+      marks INTEGER,
+      question_number TEXT,
+      bbox_json TEXT,
+      structure_json TEXT NOT NULL DEFAULT '{}',
+      UNIQUE(job_id, id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_blocks_job ON ocr_blocks(job_id, page_number, block_order);
+
+    CREATE TABLE IF NOT EXISTS ocr_preflight_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL REFERENCES ocr_jobs(id) ON DELETE CASCADE,
+      revision INTEGER NOT NULL,
+      ready INTEGER NOT NULL DEFAULT 0,
+      score REAL NOT NULL DEFAULT 0,
+      errors_json TEXT NOT NULL DEFAULT '[]',
+      warnings_json TEXT NOT NULL DEFAULT '[]',
+      checks_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(job_id, revision)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_preflight_job ON ocr_preflight_results(job_id, revision DESC);
+
+    CREATE TABLE IF NOT EXISTS ocr_exports (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL REFERENCES ocr_jobs(id) ON DELETE CASCADE,
+      revision INTEGER NOT NULL,
+      format TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      path TEXT,
+      verified INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_exports_job ON ocr_exports(job_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS document_pages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      page_number INTEGER NOT NULL,
+      source_path TEXT,
+      pdf_path TEXT,
+      extracted_text TEXT NOT NULL DEFAULT '',
+      width INTEGER NOT NULL DEFAULT 0,
+      height INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(document_id, page_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_pages_document ON document_pages(document_id, page_number);
+
     CREATE TABLE IF NOT EXISTS libraries (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -367,6 +476,13 @@ export function initializeDatabase() {
   ensureColumn("documents", "source_attribution", "TEXT NOT NULL DEFAULT ''");
   ensureColumn("documents", "rights_status", "TEXT NOT NULL DEFAULT 'clear'");
   ensureColumn("documents", "rights_restriction_note", "TEXT");
+  ensureColumn("documents", "original_source_path", "TEXT");
+  ensureColumn("documents", "docx_storage_path", "TEXT");
+  ensureColumn("documents", "structure_json", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn("documents", "ocr_job_id", "TEXT");
+  ensureColumn("ocr_jobs", "processing_stage", "TEXT NOT NULL DEFAULT 'uploaded'");
+  ensureColumn("ocr_jobs", "diagnostics_json", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn("ocr_jobs", "document_type", "TEXT NOT NULL DEFAULT 'mixed'");
   ensureColumn("ocr_jobs", "structure_json", `TEXT NOT NULL DEFAULT '{"version":1,"pages":[]}'`);
   ensureColumn("ocr_jobs", "revision", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn("ocr_jobs", "published_document_id", "TEXT");
