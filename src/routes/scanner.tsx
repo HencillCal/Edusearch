@@ -1010,8 +1010,8 @@ function ScannerPage() {
                         )}
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
 
                 <div className="mt-5 flex flex-wrap items-end gap-2 border-t border-border pt-5">
                   <label className="min-w-52 flex-1 text-xs text-muted-foreground">
