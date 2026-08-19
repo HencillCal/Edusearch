@@ -90,7 +90,7 @@ function ScannerPage() {
   const [sourceAttribution, setSourceAttribution] = useState("");
   const [rightsDeclared, setRightsDeclared] = useState(false);
   const [profile, setProfile] = useState<OcrJob["profile"]>("exam");
-  const [qualityMode, setQualityMode] = useState<OcrJob["qualityMode"]>("accurate");
+  const [qualityMode, setQualityMode] = useState<OcrJob["qualityMode"]>("balanced");
   const [ocrLanguage, setOcrLanguage] = useState("eng");
   const [reprocessing, setReprocessing] = useState(false);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
@@ -160,7 +160,7 @@ function ScannerPage() {
     setSourceAttribution(nextJob.sourceAttribution || "");
     setRightsDeclared(nextJob.rightsDeclared);
     setProfile(nextJob.profile || "exam");
-    setQualityMode(nextJob.qualityMode || "accurate");
+    setQualityMode(nextJob.qualityMode || "balanced");
     setOcrLanguage(nextJob.language || "eng");
     setSelectedPage((current) =>
       Math.min(Math.max(1, current), Math.max(1, nextJob.structure.pages.length)),
@@ -174,17 +174,27 @@ function ScannerPage() {
     );
   };
 
-  const chooseFile = async (selected: File) => {
+  const chooseFiles = async (selected: FileList | File[]) => {
+    const files = Array.from(selected).filter(Boolean);
+    if (!files.length) return;
+    if (files.length > 20) {
+      toast.error("You can upload up to 20 pages or documents at once.");
+      return;
+    }
     setStage("processing");
     setJob(null);
     setStructure(null);
     try {
       const form = new FormData();
-      form.append("file", selected);
+      for (const file of files) {
+        form.append("images", file);
+        form.append("file", file);
+      }
       form.append("profile", profile);
       form.append("qualityMode", qualityMode);
       form.append("language", ocrLanguage);
-      const result = await apiFetch<{ job: OcrJob }>("/api/ocr/jobs", {
+      form.append("combineAsDocument", "true");
+      const result = await apiFetch<{ job: OcrJob; jobs?: OcrJob[] }>("/api/ocr/jobs", {
         method: "POST",
         body: form,
       });
@@ -192,7 +202,9 @@ function ScannerPage() {
       await navigate({ to: "/scanner", search: { job: result.job.id }, replace: true });
       await queryClient.invalidateQueries({ queryKey: ["ocr-jobs"] });
       toast.success(
-        "Upload received. OCR is running in the background; this page will update when the reconstruction is ready.",
+        files.length > 1
+          ? `Uploaded ${files.length} pages. Processing OCR in background...`
+          : "Upload received. Processing OCR in background...",
       );
     } catch (error) {
       setStage("idle");
@@ -507,8 +519,8 @@ function ScannerPage() {
           )}
         </div>
 
-        <div className="mt-7 grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)]">
-          <aside className="space-y-5">
+        <div className="mt-7 grid gap-6 items-start xl:grid-cols-[300px_minmax(0,1fr)]">
+          <aside className="space-y-5 xl:sticky xl:top-6 xl:max-h-[calc(100vh-4rem)] xl:overflow-y-auto xl:pr-1">
             <div className="rounded-xl border border-border bg-card p-5 shadow-soft">
               <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
                 <label className="text-xs font-medium text-muted-foreground">
@@ -533,9 +545,9 @@ function ScannerPage() {
                     }
                     className="mt-1 h-9 w-full rounded border border-border bg-background px-2 text-sm text-foreground outline-none focus:border-brand"
                   >
+                    <option value="balanced">Balanced (Fast & clean)</option>
+                    <option value="fast">Fast (Single-pass)</option>
                     <option value="accurate">Accurate · multi-pass</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="fast">Fast</option>
                   </select>
                 </label>
                 <label className="text-xs font-medium text-muted-foreground sm:col-span-2 xl:col-span-1">
@@ -555,14 +567,15 @@ function ScannerPage() {
                 <ScanLine className="size-8 text-brand" />
                 <p className="mt-3 font-display text-base font-semibold">Upload exam or notes</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  JPG, PNG, WEBP, HEIC or PDF · up to 20 pages
+                  Select 1 or multiple images/PDFs · up to 20 pages
                 </p>
                 <input
                   ref={fileInputRef}
                   type="file"
+                  multiple
                   accept=".jpg,.jpeg,.png,.webp,.heic,.pdf"
                   className="hidden"
-                  onChange={(event) => event.target.files?.[0] && chooseFile(event.target.files[0])}
+                  onChange={(event) => event.target.files?.length && chooseFiles(event.target.files)}
                 />
                 <Button
                   className="mt-4"
@@ -578,7 +591,7 @@ function ScannerPage() {
                   ) : (
                     <FileUp className="size-4" />
                   )}
-                  {stage === "processing" ? "Processing OCR…" : "Choose file"}
+                  {stage === "processing" ? "Processing OCR…" : "Choose files"}
                 </Button>
               </label>
               <div className="mt-5 space-y-2">
