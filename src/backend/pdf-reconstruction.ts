@@ -78,13 +78,15 @@ export async function createStructuredPdf(
     monoBold: await pdf.embedFont(StandardFonts.CourierBold),
   };
 
-  const hasUnreviewedBlocks = structure.pages.some((sourcePage) =>
-    sourcePage.blocks.some(
-      (block) =>
-        (block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) &&
-        !block.reviewed,
-    ),
-  );
+  const hasUnreviewedBlocks =
+    requested.draft === true ||
+    structure.pages.some((sourcePage) =>
+      sourcePage.blocks.some(
+        (block) =>
+          (block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) &&
+          !block.reviewed,
+      ),
+    );
   let page: PDFPage;
   let cursorY = 0;
   let sourcePageNumber = 1;
@@ -1262,9 +1264,10 @@ export function assessReconstructionQuality(
   const preservedVisualBlocks = blocks.filter(
     (block) => block.preserveAsImage || block.type === "figure" || block.type === "formula",
   );
-  const missingSourceRegions = preservedVisualBlocks.filter(
-    (block) => !block.sourceRegion && !block.bbox,
-  );
+  const missingSourceRegions = preservedVisualBlocks.filter((block) => {
+    const region = block.sourceRegion || block.bbox;
+    return !region || region.width < 2 || region.height < 2;
+  });
   const malformedTables = tableBlocks.filter((block) => {
     const rows = block.tableRows?.length ? block.tableRows : parseTableRows(block.text);
     if (rows.length < 2) return true;
@@ -1350,17 +1353,21 @@ export function assessReconstructionQuality(
     });
   }
   for (const block of malformedTables.slice(0, 20)) {
-    warnings.push({
-      severity: "warning",
+    const preserved = Boolean(block.preserveAsImage && (block.sourceRegion || block.bbox));
+    const issue = {
+      severity: preserved && block.reviewed ? ("warning" as const) : ("error" as const),
       code: "table-shape",
-      message: "This table has inconsistent columns and should be checked before publication.",
+      message: preserved
+        ? "This table is preserved as a source crop; verify that crop before publication."
+        : "This table has inconsistent columns and must be corrected or preserved with a source crop.",
       page: block.page,
       blockId: block.id,
-    });
+    };
+    (issue.severity === "error" ? errors : warnings).push(issue);
   }
   for (const page of emptyPages)
-    warnings.push({
-      severity: "warning",
+    errors.push({
+      severity: "error",
       code: "empty-page",
       message: "No publishable content was detected on this page.",
       page: page.pageNumber,
@@ -1377,15 +1384,21 @@ export function assessReconstructionQuality(
       code: "missing-institution",
       message: "No institution name was detected. This is optional but should be checked.",
     });
-  if (duplicateQuestions)
+  if (structure.stats.declaredTotalMarks != null && structure.stats.marksTotalConsistent === false)
     warnings.push({
       severity: "warning",
+      code: "marks-total-mismatch",
+      message: `Declared total marks (${structure.stats.declaredTotalMarks}) do not match detected question totals (${structure.stats.totalMarks}). Check whether pages or questions are missing.`,
+    });
+  if (duplicateQuestions)
+    errors.push({
+      severity: "error",
       code: "duplicate-question",
       message: `${duplicateQuestions} duplicate main question number${duplicateQuestions === 1 ? " was" : "s were"} detected.`,
     });
   if (missingQuestionNumbers)
-    warnings.push({
-      severity: "warning",
+    errors.push({
+      severity: "error",
       code: "missing-question-number",
       message: `${missingQuestionNumbers} main question${missingQuestionNumbers === 1 ? " is" : "s are"} missing a number.`,
     });
@@ -1399,17 +1412,14 @@ export function assessReconstructionQuality(
   const penalty = Math.min(
     100,
     errors.length * 12 +
-      malformedTables.length * 4 +
+      warnings.length * 2 +
       missingSourceRegions.length * 12 +
-      emptyPages.length * 6 +
-      duplicateQuestions * 3 +
-      missingQuestionNumbers * 2 +
       (!hasTitle ? 5 : 0),
   );
   const score = Math.max(0, Math.min(100, Math.round(100 - penalty)));
   return {
-    ready: true,
-    score: Math.max(85, score),
+    ready: errors.length === 0,
+    score,
     errors,
     warnings,
     checks: {
@@ -1429,6 +1439,12 @@ export function assessReconstructionQuality(
       hasTitle,
       hasInstitution,
       totalMarks: structure.stats.totalMarks,
+      ...(structure.stats.declaredTotalMarks != null
+        ? {
+            declaredTotalMarks: structure.stats.declaredTotalMarks,
+            marksTotalConsistent: structure.stats.marksTotalConsistent,
+          }
+        : {}),
     },
   };
 }

@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertSameOrigin,
@@ -33,11 +34,15 @@ import {
   createDocx,
   createPdf,
   dataDir,
+  ensureStorage,
   expandZip,
   extractDocument,
   moveToUploads,
   normalizeOcrStructure,
+  ocrEngineHealth,
   ocrStructureToText,
+  prepareOcrPage,
+  runMultiPageOcr,
   runOcr,
   runPdfOcr,
   scanForViruses,
@@ -45,6 +50,8 @@ import {
   type StoredInput,
   type OcrProfile,
   type OcrQualityMode,
+  type OcrStructure,
+  type OcrPageEdit,
 } from "./files";
 
 const mutationMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -55,13 +62,17 @@ const allowedRightsBases = new Set([
   "public_domain",
   "institution_authorized",
 ]);
+let pendingOcrJobsResumed = false;
 
 export async function handleApiRequest(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
-  if (!url.pathname.startsWith("/api/")) return null;
+  const healthRequest = url.pathname === "/health" || url.pathname === "/ready";
+  const compatibilityRequest = url.pathname === "/extract";
+  if (!url.pathname.startsWith("/api/") && !healthRequest && !compatibilityRequest) return null;
 
   try {
     initializeDatabase();
+    resumePendingOcrJobs();
     assertSameOrigin(request);
     rateLimit(request, url.pathname);
     const response = await routeRequest(request, url);
@@ -78,7 +89,10 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   const method = request.method.toUpperCase();
   const pathname = url.pathname;
 
-  if (method === "GET" && pathname === "/api/health") return health();
+  if (method === "GET" && (pathname === "/api/health" || pathname === "/health")) return health();
+  if (method === "GET" && (pathname === "/api/ready" || pathname === "/ready")) return ready();
+  if (method === "POST" && (pathname === "/extract" || pathname === "/api/ocr/extract"))
+    return compatibilityExtract(request);
   if (method === "GET" && pathname === "/api/home") return home(request);
   if (method === "GET" && pathname === "/api/subjects") return subjects(request);
   if (method === "GET" && pathname === "/api/search") return search(request, url);
@@ -102,9 +116,31 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
 
   if (method === "GET" && pathname === "/api/ocr/jobs") return listOcrJobs(request);
   if (method === "POST" && pathname === "/api/ocr/jobs") return createOcrJob(request);
+  const ocrEventsMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/events$/);
+  if (ocrEventsMatch && method === "GET") return ocrJobEvents(request, ocrEventsMatch[1]);
+  const ocrCancelMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/cancel$/);
+  if (ocrCancelMatch && method === "POST") return cancelOcrJob(request, ocrCancelMatch[1]);
+  const ocrRetryPageMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/pages\/(\d+)\/retry$/);
+  if (ocrRetryPageMatch && method === "POST")
+    return retryOcrPage(request, ocrRetryPageMatch[1], Number(ocrRetryPageMatch[2]));
+  const ocrVerifyMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/verify$/);
+  if (ocrVerifyMatch && method === "POST") return verifyOcrJob(request, ocrVerifyMatch[1]);
+  const ocrOriginalPageMatch = pathname.match(
+    /^\/api\/ocr\/jobs\/([^/]+)\/pages\/(\d+)\/original$/,
+  );
+  if (ocrOriginalPageMatch && method === "GET")
+    return getOcrSourcePage(request, ocrOriginalPageMatch[1], Number(ocrOriginalPageMatch[2]));
+  const ocrEnhancedPageMatch = pathname.match(
+    /^\/api\/ocr\/jobs\/([^/]+)\/pages\/(\d+)\/enhanced$/,
+  );
+  if (ocrEnhancedPageMatch && method === "GET")
+    return getOcrPage(request, ocrEnhancedPageMatch[1], Number(ocrEnhancedPageMatch[2]));
   const ocrPageMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/pages\/(\d+)$/);
   if (ocrPageMatch && method === "GET")
     return getOcrPage(request, ocrPageMatch[1], Number(ocrPageMatch[2]));
+  const ocrSourcePageMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/source\/pages\/(\d+)$/);
+  if (ocrSourcePageMatch && method === "GET")
+    return getOcrSourcePage(request, ocrSourcePageMatch[1], Number(ocrSourcePageMatch[2]));
   const ocrSourceMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/source$/);
   if (ocrSourceMatch && method === "GET") return getOcrSource(request, ocrSourceMatch[1]);
   const ocrRevisionsMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/revisions$/);
@@ -116,9 +152,19 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   if (ocrReprocessMatch && method === "POST") return reprocessOcrJob(request, ocrReprocessMatch[1]);
   const ocrMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)$/);
   if (ocrMatch && method === "GET") return getOcrJob(request, ocrMatch[1]);
+  const ocrStructureMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/structure$/);
+  if (ocrStructureMatch && method === "PATCH")
+    return patchOcrStructure(request, ocrStructureMatch[1]);
+  const ocrMetadataMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/metadata$/);
+  if (ocrMetadataMatch && method === "PATCH") return patchOcrMetadata(request, ocrMetadataMatch[1]);
   if (ocrMatch && method === "PATCH") return updateOcrJob(request, ocrMatch[1]);
   const ocrPreflightMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/preflight$/);
   if (ocrPreflightMatch && method === "GET") return preflightOcrJob(request, ocrPreflightMatch[1]);
+  const ocrExportFileMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/export\/(pdf|docx)$/);
+  if (ocrExportFileMatch && method === "GET") {
+    url.searchParams.set("format", ocrExportFileMatch[2]);
+    return exportOcrJob(request, ocrExportFileMatch[1], url);
+  }
   const ocrExportMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/export$/);
   if (ocrExportMatch && method === "GET") return exportOcrJob(request, ocrExportMatch[1], url);
   const ocrPublishMatch = pathname.match(/^\/api\/ocr\/jobs\/([^/]+)\/publish$/);
@@ -236,8 +282,33 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   throw new HttpError(404, "API endpoint not found.");
 }
 
-function health() {
+async function ready() {
+  const database = getDb();
+  await ensureStorage();
+  const storageReady = ["uploads", "staging", "ocr", "exports"].every((folder) =>
+    existsSync(path.join(dataDir, folder)),
+  );
+  return json(
+    {
+      ready: storageReady,
+      database: database ? "ok" : "unavailable",
+      storage: storageReady ? "ok" : "unavailable",
+      ocr: {
+        geminiConfigured: Boolean(process.env.GEMINI_API_KEYS || process.env.API_KEYS),
+        aimlConfigured: Boolean(process.env.AIML_API_KEYS),
+        openaiConfigured: Boolean(process.env.OPENAI_API_KEYS),
+        groqConfigured: Boolean(process.env.GROQ_API_KEYS),
+        ocrTextractConfigured: Boolean(process.env.OCR_TEXTRACT_URL),
+      },
+      uptime: Math.floor(process.uptime()),
+    },
+    storageReady ? 200 : 503,
+  );
+}
+
+async function health() {
   const db = getDb();
+  const engine = await ocrEngineHealth();
   const documentCount = (
     db.prepare("SELECT COUNT(*) AS count FROM documents").get() as { count: number }
   ).count;
@@ -249,6 +320,15 @@ function health() {
     database: "sqlite-wal",
     documents: documentCount,
     searchableChunks: chunkCount,
+    ocr: {
+      ...engine,
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEYS || process.env.API_KEYS),
+      aimlConfigured: Boolean(process.env.AIML_API_KEYS),
+      openaiConfigured: Boolean(process.env.OPENAI_API_KEYS),
+      groqConfigured: Boolean(process.env.GROQ_API_KEYS),
+      ocrTextractConfigured: Boolean(process.env.OCR_TEXTRACT_URL),
+    },
+    uptime: Math.floor(process.uptime()),
     time: new Date().toISOString(),
   });
 }
@@ -1420,46 +1500,332 @@ function listOcrJobs(request: Request) {
   return json({ jobs: rows.map(mapOcrJob) });
 }
 
+async function compatibilityExtract(request: Request) {
+  const form = await request.formData();
+  const files = [...form.getAll("images"), ...form.getAll("file")].filter(
+    (value): value is File => value instanceof File && value.size > 0,
+  );
+  if (!files.length)
+    throw new HttpError(400, "No images uploaded. Please select at least one image.");
+  if (files.length > 20)
+    throw new HttpError(413, "A maximum of 20 images can be extracted at once.");
+  const language = normalizeOcrLanguage(form.get("lang") || form.get("language"));
+  const profile = normalizeOcrProfile(form.get("profile") || "mixed");
+  const stored: StoredInput[] = [];
+  let generatedPaths: string[] = [];
+  try {
+    for (const file of files) stored.push(await storeFile(file, "staging"));
+    const result = await runMultiPageOcr(
+      stored.map((file) => ({ path: file.path, originalName: file.originalName })),
+      { profile, qualityMode: "balanced", language },
+    );
+    generatedPaths = result.enhancedPaths.filter(Boolean);
+    const failedPages = new Map(result.pageErrors.map((page) => [page.page, page.error]));
+    const results = result.structure.pages.map((page, index) => {
+      const text = page.blocks
+        .map((block) => block.text)
+        .join("\n\n")
+        .trim();
+      return {
+        name: stored[index]?.originalName || `page-${index + 1}`,
+        text,
+        confidence: page.confidence > 0 ? page.confidence : null,
+        success: Boolean(text),
+        ...(failedPages.has(index + 1) ? { error: failedPages.get(index + 1) } : {}),
+      };
+    });
+    return json({ results, pages: result.structure.pages.length, engine: result.pipeline.engine });
+  } finally {
+    await Promise.all(
+      [...stored.map((file) => file.path), ...generatedPaths].map((filePath) =>
+        unlink(filePath).catch(() => undefined),
+      ),
+    );
+  }
+}
+
 async function createOcrJob(request: Request) {
   const user = sessionFromRequest(request);
   const form = await request.formData();
-  const file = form.get("file");
-  if (!(file instanceof File)) throw new HttpError(400, "Choose an image or PDF to scan.");
-  const profile = normalizeOcrProfile(form.get("profile"));
-  const qualityMode = normalizeOcrQualityMode(form.get("qualityMode"));
-  const language = normalizeOcrLanguage(form.get("language"));
-  const stored = await storeFile(file, "ocr");
-  if (![".pdf", ".jpg", ".jpeg", ".png", ".webp", ".heic"].includes(stored.extension)) {
-    throw new HttpError(415, "OCR accepts PDF, JPG, PNG, WEBP and HEIC files.");
+  const files = [...form.getAll("images"), ...form.getAll("file")].filter(
+    (value): value is File => value instanceof File && value.size > 0,
+  );
+  if (!files.length) throw new HttpError(400, "Choose at least one image or PDF to scan.");
+  if (files.length > 20) throw new HttpError(413, "A single OCR job can contain at most 20 pages.");
+  if (files.some((file) => file.size > 20 * 1024 * 1024))
+    throw new HttpError(413, "Each OCR image must be 20 MB or smaller.");
+  const profile = normalizeOcrProfile(form.get("profile") || form.get("documentProfile"));
+  const qualityMode = normalizeOcrQualityMode(form.get("qualityMode") || form.get("ocrMode"));
+  const language = normalizeOcrLanguage(form.get("language") || form.get("languages"));
+  const combineAsDocument = String(form.get("combineAsDocument") ?? "true") !== "false";
+  if (files.length > 1 && files.some((file) => file.name.toLowerCase().endsWith(".pdf")))
+    throw new HttpError(
+      415,
+      "Combine PDF pages separately or upload images for a multi-page OCR job.",
+    );
+  const storedFiles: StoredInput[] = [];
+  try {
+    for (const file of files) {
+      const stored = await storeFile(file, "ocr");
+      if (
+        ![
+          ".pdf",
+          ".jpg",
+          ".jpeg",
+          ".png",
+          ".webp",
+          ".bmp",
+          ".gif",
+          ".tif",
+          ".tiff",
+          ".heic",
+          ".heif",
+        ].includes(stored.extension)
+      )
+        throw new HttpError(415, `Unsupported OCR page type: ${stored.extension || "unknown"}.`);
+      await scanForViruses(stored.path);
+      storedFiles.push(stored);
+    }
+  } catch (error) {
+    await Promise.all(storedFiles.map((stored) => unlink(stored.path).catch(() => undefined)));
+    throw error;
   }
-  await scanForViruses(stored.path);
+  const sourcePaths = storedFiles.map((stored) => stored.path);
+  const sourceNames = storedFiles.map((stored) => stored.originalName);
+  let pageEdits: OcrPageEdit[] = [];
+  const pageEditsValue = form.get("pageEdits");
+  if (typeof pageEditsValue === "string" && pageEditsValue.trim()) {
+    try {
+      const parsed = JSON.parse(pageEditsValue);
+      pageEdits = Array.isArray(parsed) ? parsed.slice(0, storedFiles.length) : [];
+    } catch {
+      await Promise.all(storedFiles.map((stored) => unlink(stored.path).catch(() => undefined)));
+      throw new HttpError(400, "Invalid page editing instructions.");
+    }
+  }
+  const processingFiles = await Promise.all(
+    storedFiles.map(async (stored, index) => ({
+      ...stored,
+      path: await prepareOcrPage(stored.path, pageEdits[index] || {}),
+    })),
+  );
+  const temporaryProcessingPaths = processingFiles
+    .map((stored, index) => (stored.path !== storedFiles[index].path ? stored.path : ""))
+    .filter(Boolean);
+  if (!combineAsDocument && processingFiles.length > 1) {
+    const jobs = [];
+    for (const [index, processingFile] of processingFiles.entries()) {
+      const id = randomUUID();
+      const originalPath = sourcePaths[index];
+      const originalName = sourceNames[index];
+      getDb()
+        .prepare(
+          `INSERT INTO ocr_jobs(id,user_id,original_filename,source_path,source_paths_json,source_filenames_json,combine_as_document,progress,pages_completed,total_pages,current_stage,status,processing_stage,ocr_profile,ocr_language,ocr_quality_mode)
+           VALUES(?,?,?,?,?,?,0,0,0,1,'Upload received','processing','uploaded',?,?,?)`,
+        )
+        .run(
+          id,
+          user?.id ?? null,
+          originalName,
+          originalPath,
+          JSON.stringify([originalPath]),
+          JSON.stringify([originalName]),
+          profile,
+          language,
+          qualityMode,
+        );
+      queueOcrJobProcessing(
+        id,
+        {
+          pages: [processingFile],
+          originalPaths: [originalPath],
+          temporaryPaths: temporaryProcessingPaths.includes(processingFile.path)
+            ? [processingFile.path]
+            : [],
+        },
+        {
+          profile,
+          qualityMode,
+          language,
+          userId: user?.id ?? null,
+          revision: 1,
+          note: "Initial separate-document OCR reconstruction",
+        },
+      );
+      jobs.push(getOcrJobRow(id));
+    }
+    return json({ job: jobs[0], jobs, separateDocuments: true }, 202);
+  }
   const id = randomUUID();
   getDb()
     .prepare(
       `
-    INSERT INTO ocr_jobs(id,user_id,original_filename,source_path,status,ocr_profile,ocr_language,ocr_quality_mode)
-    VALUES(?,?,?,?, 'processing',?,?,?)
+    INSERT INTO ocr_jobs(id,user_id,original_filename,source_path,source_paths_json,source_filenames_json,combine_as_document,progress,pages_completed,total_pages,current_stage,status,processing_stage,ocr_profile,ocr_language,ocr_quality_mode)
+    VALUES(?,?,?,?,?,?,?,0,0,?,'Upload received','processing','uploaded',?,?,?)
   `,
     )
-    .run(id, user?.id ?? null, stored.originalName, stored.path, profile, language, qualityMode);
+    .run(
+      id,
+      user?.id ?? null,
+      sourceNames.join(", "),
+      sourcePaths[0],
+      JSON.stringify(sourcePaths),
+      JSON.stringify(sourceNames),
+      combineAsDocument ? 1 : 0,
+      storedFiles.length,
+      profile,
+      language,
+      qualityMode,
+    );
+  queueOcrJobProcessing(
+    id,
+    {
+      pages: processingFiles,
+      originalPaths: sourcePaths,
+      temporaryPaths: temporaryProcessingPaths,
+    },
+    {
+      profile,
+      qualityMode,
+      language,
+      userId: user?.id ?? null,
+      revision: 1,
+      note: `Initial ${storedFiles.length}-page OCR reconstruction`,
+    },
+  );
+  return json({ job: getOcrJobRow(id), pageCount: storedFiles.length }, 202);
+}
+
+type OcrQueuePage = Pick<StoredInput, "path" | "extension" | "originalName">;
+type OcrQueueSource = {
+  pages: OcrQueuePage[];
+  originalPaths?: string[];
+  temporaryPaths?: string[];
+};
+type OcrQueueOptions = {
+  profile: OcrProfile;
+  qualityMode: OcrQualityMode;
+  language: string;
+  userId: string | null;
+  revision: number;
+  note: string;
+  forceImageOcr?: boolean;
+  oldEnhancedPaths?: string[];
+};
+
+const activeOcrJobs = new Set<string>();
+
+function queueOcrJobProcessing(id: string, source: OcrQueueSource, options: OcrQueueOptions) {
+  if (activeOcrJobs.has(id)) return;
+  activeOcrJobs.add(id);
+  void processOcrJob(id, source, options).finally(() => activeOcrJobs.delete(id));
+}
+
+function resumePendingOcrJobs() {
+  if (pendingOcrJobsResumed) return;
+  pendingOcrJobsResumed = true;
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM ocr_jobs WHERE status='processing' OR (status NOT IN ('ready','awaiting_correction','published','failed') AND processing_stage IN ('uploaded','preprocessing','ocr_running','ocr_completed','layout_analysis','reconstructing'))`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  for (const row of rows) {
+    const sourcePaths = jsonArray(row.source_paths_json);
+    const sourceNames = jsonArray(row.source_filenames_json);
+    const fallbackPath = String(row.source_path || "");
+    const paths = sourcePaths.length ? sourcePaths : fallbackPath ? [fallbackPath] : [];
+    if (!paths.length) continue;
+    queueOcrJobProcessing(
+      String(row.id),
+      {
+        pages: paths.map((sourcePath, index) => ({
+          path: sourcePath,
+          extension: path.extname(sourcePath).toLowerCase(),
+          originalName:
+            sourceNames[index] || String(row.original_filename || path.basename(sourcePath)),
+          size: 0,
+          sha256: "",
+          mimeType: "application/octet-stream",
+        })),
+        originalPaths: paths,
+      },
+      {
+        profile: normalizeOcrProfile(row.ocr_profile),
+        qualityMode: normalizeOcrQualityMode(row.ocr_quality_mode),
+        language: normalizeOcrLanguage(row.ocr_language),
+        userId: row.user_id ? String(row.user_id) : null,
+        revision: Number(row.revision || 1),
+        note: "Resumed OCR processing after server restart",
+        oldEnhancedPaths: jsonArray(row.enhanced_paths_json),
+      },
+    );
+  }
+}
+
+async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQueueOptions) {
+  const db = getDb();
+  const startedAt = Date.now();
   try {
-    const result =
-      stored.extension === ".pdf"
-        ? await runPdfOcr(stored.path, { profile, qualityMode, language })
-        : await runOcr(stored.path, { profile, qualityMode, language });
+    assertOcrJobActive(id);
+    updateOcrProcessingStage(id, "preprocessing");
+    updateOcrProcessingStage(id, "ocr_running");
+    const firstPage = source.pages[0];
+    const isPdf = source.pages.length === 1 && firstPage.extension === ".pdf";
+    const result = isPdf
+      ? await runPdfOcr(firstPage.path, {
+          profile: options.profile,
+          qualityMode: options.qualityMode,
+          language: options.language,
+          forceImageOcr: options.forceImageOcr,
+        })
+      : await runMultiPageOcr(
+          source.pages.map((page) => ({ path: page.path, originalName: page.originalName })),
+          {
+            profile: options.profile,
+            qualityMode: options.qualityMode,
+            language: options.language,
+            forceImageOcr: options.forceImageOcr,
+          },
+          (progress) => updateOcrProgress(id, progress),
+        );
+    assertOcrJobActive(id);
+    updateOcrProcessingStage(id, "ocr_completed");
+    updateOcrProcessingStage(id, "layout_analysis");
     const structure = normalizeOcrStructure(result.structure, result.text, result.confidence);
-    const correctedText = ocrStructureToText(structure) || result.text;
+    updateOcrProcessingStage(id, "reconstructing");
+    const correctedText = ocrStructureToText(structure).trim();
+    assertOcrJobActive(id);
+    if (!isActualOcrText(correctedText))
+      throw new HttpError(422, "OCR completed but no readable source text was found.", {
+        stage: "reconstructing",
+        diagnostics: { rawTextLength: result.text.length },
+      });
+    const originalName = source.pages.map((page) => page.originalName).join(", ");
+    const sourceExtension = source.pages[0]?.extension || ".jpg";
     const metadata = await suggestMetadata(
-      stored.originalName,
+      originalName,
       correctedText,
-      "PDF",
+      sourceExtension === ".pdf" ? "PDF" : "Image",
       structure.stats.pages || result.enhancedPaths.length || 1,
     );
-    const status = structure.stats.lowConfidenceBlocks > 0 ? "awaiting_correction" : "ready";
-    const db = getDb();
+    const preflight = assessReconstructionQuality(structure, metadata);
+    if (result.qualityScore < 70)
+      preflight.errors.push({
+        severity: "error",
+        code: "ocr-quality",
+        message: "Overall OCR quality is below the verified-export threshold.",
+      });
+    preflight.ready = preflight.errors.length === 0;
+    const status = preflight.ready ? "ready" : "awaiting_correction";
+    const stage = preflight.ready ? "verified" : "awaiting_review";
+    const pipeline = {
+      ...result.pipeline,
+      processingMs: Number(result.pipeline.processingMs || Date.now() - startedAt),
+      documentType: result.pipeline.documentType || inferOcrDocumentType(metadata.docType),
+    };
     db.prepare(
       `
-      UPDATE ocr_jobs SET enhanced_paths_json=?,extracted_text=?,corrected_text=?,confidence=?,quality_score=?,pipeline_json=?,metadata_json=?,structure_json=?,revision=1,status=?,updated_at=CURRENT_TIMESTAMP
+      UPDATE ocr_jobs SET enhanced_paths_json=?,extracted_text=?,corrected_text=?,confidence=?,quality_score=?,pipeline_json=?,metadata_json=?,structure_json=?,revision=?,status=?,processing_stage=?,progress=?,pages_completed=?,total_pages=?,current_stage=?,document_type=?,diagnostics_json=?,error_message=NULL,updated_at=CURRENT_TIMESTAMP
       WHERE id=?
     `,
     ).run(
@@ -1468,42 +1834,300 @@ async function createOcrJob(request: Request) {
       correctedText,
       result.confidence,
       result.qualityScore,
-      JSON.stringify(result.pipeline),
-      JSON.stringify(metadata),
+      JSON.stringify(pipeline),
+      JSON.stringify({ ...metadata, detectedDocumentType: pipeline.documentType }),
       JSON.stringify(structure),
+      options.revision,
       status,
+      stage,
+      stage === "verified" ? 100 : 90,
+      structure.stats.pages,
+      structure.stats.pages,
+      stage.replaceAll("_", " "),
+      pipeline.documentType,
+      JSON.stringify({
+        engine: pipeline.engine,
+        language: options.language,
+        durationMs: Date.now() - startedAt,
+        source: {
+          extensions: source.pages.map((page) => page.extension),
+          pageCount: source.pages.length,
+        },
+        rawCharacters: result.text.length,
+        questionsDetected: structure.stats.questions,
+        marksDetected: structure.stats.totalMarks,
+        lowConfidenceRegions: structure.stats.lowConfidenceBlocks,
+      }),
       id,
+    );
+    persistOcrGeometry(
+      id,
+      structure,
+      result.enhancedPaths,
+      pipeline,
+      source.originalPaths || source.pages.map((page) => page.path),
+      source.pages.map((page) => page.originalName),
+      "success",
+    );
+    db.prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?").run(
+      id,
+      options.revision,
+    );
+    db.prepare(
+      `INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)`,
+    ).run(
+      id,
+      options.revision,
+      preflight.ready ? 1 : 0,
+      preflight.score,
+      JSON.stringify(preflight.errors),
+      JSON.stringify(preflight.warnings),
+      JSON.stringify(preflight.checks),
     );
     db.prepare(
       `
-      INSERT INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by)
-      VALUES(?,1,?,?,?,?,?)
+      INSERT OR REPLACE INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by)
+      VALUES(?,?,?,?,?,?,?)
     `,
     ).run(
       id,
+      options.revision,
       correctedText,
-      JSON.stringify(metadata),
+      JSON.stringify({ ...metadata, detectedDocumentType: pipeline.documentType }),
       JSON.stringify(structure),
-      "Initial high-accuracy OCR reconstruction",
-      user?.id ?? null,
+      options.note,
+      options.userId,
     );
-    audit(user?.id ?? null, "ocr.create", "ocr_job", id, {
+    await Promise.all(
+      (options.oldEnhancedPaths || [])
+        .filter((filePath) => !result.enhancedPaths.includes(filePath))
+        .map((filePath) => unlink(filePath).catch(() => undefined)),
+    );
+    console.info("[EduSearch OCR] completed", {
+      jobId: id,
+      rawOcrText: result.text,
+      detectedQuestions: structure.stats.questions,
+      detectedMarks: structure.stats.totalMarks,
+      structuredBlocks: structure.stats.blocks,
+      preflightScore: preflight.score,
+      pdfSource: source.pages.map((page) => page.path),
+    });
+    audit(options.userId, "ocr.process", "ocr_job", id, {
       pages: structure.stats.pages,
       confidence: result.confidence,
       qualityScore: result.qualityScore,
-      profile,
-      qualityMode,
-      language,
+      questions: structure.stats.questions,
+      marks: structure.stats.totalMarks,
       status,
+      stage,
     });
-    return json({ job: getOcrJobRow(id) }, 201);
   } catch (error) {
-    getDb()
-      .prepare(
-        "UPDATE ocr_jobs SET status='failed',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      )
-      .run(error instanceof Error ? error.message : "OCR failed", id);
-    throw error;
+    const details = error instanceof HttpError ? error.details : undefined;
+    const errorMessage = error instanceof Error ? error.message : "OCR failed";
+    const enhancedPath =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? String((details as Record<string, unknown>).enhancedPath || "")
+        : "";
+    db.prepare(
+      "UPDATE ocr_jobs SET status='failed',processing_stage='failed',error_message=?,diagnostics_json=?,enhanced_paths_json=CASE WHEN ? <> '' THEN json_array(?) ELSE enhanced_paths_json END,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    ).run(
+      errorMessage,
+      JSON.stringify({
+        ...(details && typeof details === "object" ? details : {}),
+        durationMs: Date.now() - startedAt,
+      }),
+      enhancedPath,
+      enhancedPath,
+      id,
+    );
+    console.error("[EduSearch OCR] failed", {
+      jobId: id,
+      stage: "ocr_running",
+      error: errorMessage,
+      details,
+    });
+    audit(options.userId, "ocr.failed", "ocr_job", id, { error: errorMessage, details });
+  } finally {
+    await Promise.all(
+      (source.temporaryPaths || []).map((filePath) => unlink(filePath).catch(() => undefined)),
+    );
+  }
+}
+
+function assertOcrJobActive(id: string) {
+  const row = getDb().prepare("SELECT status,error_message FROM ocr_jobs WHERE id=?").get(id) as
+    { status?: string; error_message?: string } | undefined;
+  if (row?.status === "failed" && /cancelled/i.test(String(row.error_message || "")))
+    throw new HttpError(409, "OCR job was cancelled.", { stage: "failed" });
+}
+
+function updateOcrProgress(id: string, progress: { page: number; total: number; stage: string }) {
+  const completed =
+    progress.stage === "ocr_completed" ? progress.page : Math.max(0, progress.page - 1);
+  const percent = Math.round(
+    Math.max(
+      0,
+      Math.min(
+        99,
+        ((completed + (progress.stage === "ocr_completed" ? 1 : 0)) / Math.max(1, progress.total)) *
+          75,
+      ),
+    ),
+  );
+  getDb()
+    .prepare(
+      "UPDATE ocr_jobs SET progress=?,pages_completed=?,total_pages=?,current_stage=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    )
+    .run(
+      percent,
+      completed,
+      progress.total,
+      `${progress.stage} page ${progress.page} of ${progress.total}`,
+      id,
+    );
+}
+
+function updateOcrProcessingStage(
+  id: string,
+  stage:
+    | "uploaded"
+    | "preprocessing"
+    | "ocr_running"
+    | "ocr_completed"
+    | "layout_analysis"
+    | "reconstructing"
+    | "awaiting_review"
+    | "verified"
+    | "failed"
+    | "published",
+) {
+  const progressByStage: Record<string, number> = {
+    uploaded: 0,
+    preprocessing: 10,
+    ocr_running: 20,
+    ocr_completed: 75,
+    layout_analysis: 82,
+    reconstructing: 90,
+    awaiting_review: 100,
+    verified: 100,
+    failed: 100,
+    published: 100,
+  };
+  getDb()
+    .prepare(
+      "UPDATE ocr_jobs SET processing_stage=?,progress=?,current_stage=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    )
+    .run(stage, progressByStage[stage] ?? 0, stage.replaceAll("_", " "), id);
+}
+
+function isActualOcrText(value: string) {
+  const compact = value.replace(/\s/g, "");
+  if (compact.length < 4) return false;
+  const readable = (compact.match(/[\p{L}\p{N}]/gu) || []).length;
+  return readable >= 4 && readable / compact.length >= 0.35;
+}
+
+function inferOcrDocumentType(value: unknown) {
+  const normalized = String(value || "").toLowerCase();
+  if (/marking|answer/.test(normalized)) return "marking_scheme";
+  if (/assignment/.test(normalized)) return "assignment";
+  if (/practical|laboratory/.test(normalized)) return "practical";
+  if (/outline|syllabus/.test(normalized)) return "course_outline";
+  if (/research|thesis/.test(normalized)) return "research_document";
+  if (/exam|paper/.test(normalized)) return "exam";
+  if (/note/.test(normalized)) return "notes";
+  return "mixed";
+}
+
+function persistOcrGeometry(
+  jobId: string,
+  structure: OcrStructure,
+  enhancedPaths: string[],
+  pipeline: Record<string, unknown>,
+  originalPaths: string[] = [],
+  originalNames: string[] = [],
+  pageStatus: string = "success",
+) {
+  const db = getDb();
+  db.prepare("DELETE FROM ocr_blocks WHERE job_id=?").run(jobId);
+  db.prepare("DELETE FROM ocr_pages WHERE job_id=?").run(jobId);
+  const insertPage = db.prepare(
+    "INSERT INTO ocr_pages(job_id,page_number,sort_order,original_filename,original_path,width,height,enhanced_path,raw_text,status,error_message,confidence,diagnostics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  const insertLine = db.prepare(
+    "INSERT INTO ocr_lines(page_id,line_number,text,confidence,x,y,width,height,agreement,needs_review) VALUES(?,?,?,?,?,?,?,?,?,?)",
+  );
+  const insertWord = db.prepare(
+    "INSERT INTO ocr_words(line_id,word_number,text,confidence,x,y,width,height,page_number,line_number) VALUES(?,?,?,?,?,?,?,?,?,?)",
+  );
+  const insertBlock = db.prepare(
+    "INSERT INTO ocr_blocks(id,job_id,page_number,block_order,type,text,confidence,needs_review,reviewed,marks,question_number,bbox_json,structure_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  for (const page of structure.pages) {
+    const pageResult = insertPage.run(
+      jobId,
+      page.pageNumber,
+      page.pageNumber - 1,
+      originalNames[page.pageNumber - 1] || `page-${page.pageNumber}`,
+      originalPaths[page.pageNumber - 1] || null,
+      page.width,
+      page.height,
+      enhancedPaths[page.pageNumber - 1] || null,
+      page.blocks.map((block) => block.text).join("\n"),
+      pageStatus,
+      null,
+      page.confidence,
+      JSON.stringify({
+        pipeline,
+        lineCount: page.lines?.length || 0,
+        wordCount: page.words?.length || 0,
+      }),
+    );
+    const pageId = Number(pageResult.lastInsertRowid);
+    for (const [lineIndex, line] of (page.lines || []).entries()) {
+      const lineResult = insertLine.run(
+        pageId,
+        line.line || lineIndex + 1,
+        line.text,
+        line.confidence,
+        line.bbox.left,
+        line.bbox.top,
+        line.bbox.width,
+        line.bbox.height,
+        line.agreement ?? 1,
+        line.needsReview ? 1 : 0,
+      );
+      const lineId = Number(lineResult.lastInsertRowid);
+      for (const [wordIndex, word] of line.words.entries())
+        insertWord.run(
+          lineId,
+          wordIndex + 1,
+          word.text,
+          word.confidence,
+          word.left,
+          word.top,
+          word.width,
+          word.height,
+          word.page,
+          word.line,
+        );
+    }
+    for (const block of page.blocks)
+      insertBlock.run(
+        `${jobId}:${block.id}`,
+        jobId,
+        page.pageNumber,
+        block.order,
+        block.type,
+        block.text,
+        block.confidence,
+        block.needsReview ? 1 : 0,
+        block.reviewed ? 1 : 0,
+        block.marks ?? null,
+        block.questionNumber ?? null,
+        JSON.stringify(block.bbox || null),
+        JSON.stringify(block),
+      );
   }
 }
 
@@ -1516,90 +2140,111 @@ async function reprocessOcrJob(request: Request, id: string) {
   const qualityMode = normalizeOcrQualityMode(body.qualityMode ?? row.ocr_quality_mode);
   const language = normalizeOcrLanguage(body.language ?? row.ocr_language);
   const forceImageOcr = body.forceImageOcr === true;
+  const sourcePaths = jsonArray(row.source_paths_json);
+  const sourceNames = jsonArray(row.source_filenames_json);
+  const fallbackPath = String(row.source_path);
+  const paths = sourcePaths.length ? sourcePaths : [fallbackPath];
+  const sourcePath = paths[0];
+  const extension = path.extname(sourcePath).toLowerCase();
   getDb()
     .prepare(
-      "UPDATE ocr_jobs SET status='processing',error_message=NULL,ocr_profile=?,ocr_language=?,ocr_quality_mode=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      "UPDATE ocr_jobs SET status='processing',processing_stage='uploaded',progress=0,pages_completed=0,total_pages=?,current_stage='Upload received',error_message=NULL,ocr_profile=?,ocr_language=?,ocr_quality_mode=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
     )
-    .run(profile, language, qualityMode, id);
-  try {
-    const sourcePath = String(row.source_path);
-    const extension = path.extname(sourcePath).toLowerCase();
-    const result =
-      extension === ".pdf"
-        ? await runPdfOcr(sourcePath, { profile, qualityMode, language, forceImageOcr })
-        : await runOcr(sourcePath, { profile, qualityMode, language, forceImageOcr });
-    const structure = normalizeOcrStructure(result.structure, result.text, result.confidence);
-    const correctedText = ocrStructureToText(structure) || result.text;
-    const revision = Number(row.revision || 1) + 1;
-    const status = structure.stats.lowConfidenceBlocks > 0 ? "awaiting_correction" : "ready";
-    const existingMetadata = jsonObject<Record<string, unknown>>(row.metadata_json);
-    const metadata = Object.keys(existingMetadata).length
-      ? existingMetadata
-      : await suggestMetadata(
-          String(row.original_filename),
-          correctedText,
-          "PDF",
-          structure.stats.pages || 1,
-        );
-    const oldEnhancedPaths = jsonArray(row.enhanced_paths_json);
-    getDb()
-      .prepare(
-        `
-      UPDATE ocr_jobs SET enhanced_paths_json=?,extracted_text=?,corrected_text=?,confidence=?,quality_score=?,pipeline_json=?,metadata_json=?,structure_json=?,revision=?,status=?,updated_at=CURRENT_TIMESTAMP
-      WHERE id=?
-    `,
-      )
-      .run(
-        JSON.stringify(result.enhancedPaths),
-        result.text,
-        correctedText,
-        result.confidence,
-        result.qualityScore,
-        JSON.stringify(result.pipeline),
-        JSON.stringify(metadata),
-        JSON.stringify(structure),
-        revision,
-        status,
-        id,
-      );
-    getDb()
-      .prepare(
-        `
-      INSERT INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by)
-      VALUES(?,?,?,?,?,?,?)
-    `,
-      )
-      .run(
-        id,
-        revision,
-        correctedText,
-        JSON.stringify(metadata),
-        JSON.stringify(structure),
-        `Reprocessed with ${qualityMode} ${profile} OCR (${language})`,
-        user?.id ?? null,
-      );
-    await Promise.all(
-      oldEnhancedPaths
-        .filter((filePath) => !result.enhancedPaths.includes(filePath))
-        .map((filePath) => unlink(filePath).catch(() => undefined)),
-    );
-    audit(user?.id ?? null, "ocr.reprocess", "ocr_job", id, {
-      revision,
+    .run(paths.length, profile, language, qualityMode, id);
+  queueOcrJobProcessing(
+    id,
+    {
+      pages: paths.map((pagePath, index) => ({
+        path: pagePath,
+        extension: path.extname(pagePath).toLowerCase(),
+        originalName: sourceNames[index] || String(row.original_filename),
+        size: 0,
+        sha256: "",
+        mimeType: "application/octet-stream",
+      })),
+      originalPaths: paths,
+    },
+    {
       profile,
       qualityMode,
       language,
-      qualityScore: result.qualityScore,
+      userId: user?.id ?? null,
+      revision: Number(row.revision || 1) + 1,
+      note: `Reprocessed with ${qualityMode} ${profile} OCR (${language})`,
       forceImageOcr,
+      oldEnhancedPaths: jsonArray(row.enhanced_paths_json),
+    },
+  );
+  return json({ job: getOcrJobRow(id) }, 202);
+}
+
+function ocrJobEvents(request: Request, id: string) {
+  const { row } = requireOcrJobAccess(request, id);
+  const payload = `event: progress\ndata: ${JSON.stringify({
+    id,
+    status: String(row.status),
+    stage: normalizeOcrStage(row),
+    progress: Number(row.progress || 0),
+    pagesCompleted: Number(row.pages_completed || 0),
+    totalPages: Number(row.total_pages || 1),
+    currentStage: String(row.current_stage || ""),
+  })}\n\n`;
+  return new Response(payload, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-store",
+      connection: "keep-alive",
+    },
+  });
+}
+
+function cancelOcrJob(request: Request, id: string) {
+  const { user } = requireOcrJobAccess(request, id);
+  getDb()
+    .prepare(
+      "UPDATE ocr_jobs SET status='failed',processing_stage='failed',progress=100,current_stage='Cancelled by user',error_message='OCR job cancelled by user',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='processing'",
+    )
+    .run(id);
+  audit(user?.id ?? null, "ocr.cancel", "ocr_job", id, {});
+  return json({ job: getOcrJobRow(id) });
+}
+
+async function retryOcrPage(request: Request, id: string, pageNumber: number) {
+  if (pageNumber < 1) throw new HttpError(400, "Invalid OCR page number.");
+  const { row } = requireOcrJobAccess(request, id);
+  if (row.status === "published") throw new HttpError(409, "Published OCR jobs cannot be retried.");
+  getDb()
+    .prepare(
+      "UPDATE ocr_jobs SET diagnostics_json=json_set(COALESCE(diagnostics_json,'{}'),'$.retryPage',?),updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    )
+    .run(pageNumber, id);
+  return reprocessOcrJob(request, id);
+}
+
+function verifyOcrJob(request: Request, id: string) {
+  const { row, user } = requireOcrJobAccess(request, id);
+  const metadata = jsonObject<Record<string, unknown>>(row.metadata_json);
+  const structure = normalizeOcrStructure(
+    jsonObject(row.structure_json),
+    String(row.corrected_text || row.extracted_text || ""),
+    Number(row.confidence || 0),
+  );
+  const result = assessReconstructionQuality(structure, metadata);
+  if (Number(row.quality_score || 0) < 70)
+    result.errors.push({
+      severity: "error",
+      code: "ocr-quality",
+      message: "Overall OCR quality is below the verified-export threshold.",
     });
-    return json({ job: getOcrJobRow(id) });
-  } catch (error) {
-    getDb()
-      .prepare(
-        "UPDATE ocr_jobs SET status='failed',error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      )
-      .run(error instanceof Error ? error.message : "OCR reprocessing failed", id);
-    throw error;
-  }
+  if (result.errors.length)
+    throw new HttpError(422, "Verification is blocked by OCR preflight issues.", result);
+  getDb()
+    .prepare(
+      "UPDATE ocr_jobs SET status='ready',processing_stage='verified',progress=100,current_stage='Verified',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    )
+    .run(id);
+  audit(user?.id ?? null, "ocr.verify", "ocr_job", id, { revision: row.revision });
+  return json({ job: getOcrJobRow(id), preflight: result });
 }
 
 function getOcrJob(request: Request, id: string) {
@@ -1610,6 +2255,15 @@ function getOcrJob(request: Request, id: string) {
 function getOcrSource(request: Request, id: string) {
   const { row } = requireOcrJobAccess(request, id);
   return servePrivateFile(String(row.source_path), String(row.original_filename));
+}
+
+function getOcrSourcePage(request: Request, id: string, pageNumber: number) {
+  const { row } = requireOcrJobAccess(request, id);
+  const paths = jsonArray(row.source_paths_json);
+  const sourcePath = paths[pageNumber - 1] || (pageNumber === 1 ? String(row.source_path) : "");
+  const names = jsonArray(row.source_filenames_json);
+  if (!sourcePath) throw new HttpError(404, "Original OCR page not found.");
+  return servePrivateFile(sourcePath, names[pageNumber - 1] || `ocr-source-page-${pageNumber}`);
 }
 
 function getOcrPage(request: Request, id: string, pageNumber: number) {
@@ -1645,6 +2299,36 @@ function getOcrRevisions(request: Request, id: string) {
   });
 }
 
+async function patchOcrStructure(request: Request, id: string) {
+  const body = await readJson(request);
+  return updateOcrJob(
+    new Request(request.url, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        ...(request.headers.get("cookie") ? { cookie: request.headers.get("cookie")! } : {}),
+      },
+      body: JSON.stringify({ structure: body.structure || body }),
+    }),
+    id,
+  );
+}
+
+async function patchOcrMetadata(request: Request, id: string) {
+  const body = await readJson(request);
+  return updateOcrJob(
+    new Request(request.url, {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        ...(request.headers.get("cookie") ? { cookie: request.headers.get("cookie")! } : {}),
+      },
+      body: JSON.stringify({ metadata: body.metadata || body }),
+    }),
+    id,
+  );
+}
+
 async function updateOcrJob(request: Request, id: string) {
   const { row, user } = requireOcrJobAccess(request, id);
   if (String(row.status) === "published")
@@ -1661,13 +2345,24 @@ async function updateOcrJob(request: Request, id: string) {
     ? normalizeOcrStructure(body.structure, fallbackText, Number(row.confidence || 0))
     : buildOcrStructure(fallbackText, Number(row.confidence || 0));
   const correctedText = ocrStructureToText(structure).slice(0, 2_000_000);
+  if (!isActualOcrText(correctedText))
+    throw new HttpError(422, "Cannot save an OCR revision without actual extracted source text.");
   const metadata = body.metadata
     ? normalizeMetadata(body.metadata, jsonObject(row.metadata_json))
     : jsonObject(row.metadata_json);
   const note =
     typeof body.note === "string" ? body.note.trim().slice(0, 240) : "Saved OCR corrections";
   const revision = Number(row.revision || 1) + 1;
-  const status = structure.stats.lowConfidenceBlocks > 0 ? "awaiting_correction" : "ready";
+  const preflight = assessReconstructionQuality(structure, metadata);
+  if (Number(row.quality_score || 0) < 70)
+    preflight.errors.push({
+      severity: "error",
+      code: "ocr-quality",
+      message: "Overall OCR quality is below the verified-export threshold.",
+    });
+  preflight.ready = preflight.errors.length === 0;
+  const status = preflight.ready ? "ready" : "awaiting_correction";
+  const processingStage = preflight.ready ? "verified" : "awaiting_review";
   const rightsTouched = ["rightsBasis", "sourceAttribution", "rightsDeclaration"].some((key) =>
     Object.prototype.hasOwnProperty.call(body, key),
   );
@@ -1697,7 +2392,7 @@ async function updateOcrJob(request: Request, id: string) {
   const db = getDb();
   db.prepare(
     `
-    UPDATE ocr_jobs SET corrected_text=?,metadata_json=?,structure_json=?,revision=?,status=?,rights_basis=?,source_attribution=?,rights_declared=?,rights_declared_by=?,rights_declared_at=?,user_id=COALESCE(user_id,?),updated_at=CURRENT_TIMESTAMP WHERE id=?
+    UPDATE ocr_jobs SET corrected_text=?,metadata_json=?,structure_json=?,revision=?,status=?,processing_stage=?,document_type=?,diagnostics_json=?,rights_basis=?,source_attribution=?,rights_declared=?,rights_declared_by=?,rights_declared_at=?,user_id=COALESCE(user_id,?),updated_at=CURRENT_TIMESTAMP WHERE id=?
   `,
   ).run(
     correctedText,
@@ -1705,6 +2400,9 @@ async function updateOcrJob(request: Request, id: string) {
     JSON.stringify(structure),
     revision,
     status,
+    processingStage,
+    inferOcrDocumentType(metadata.docType),
+    JSON.stringify({ source: "user_revision", preflightScore: preflight.score }),
     rightsBasis,
     sourceAttribution,
     rightsDeclared ? 1 : 0,
@@ -1726,6 +2424,26 @@ async function updateOcrJob(request: Request, id: string) {
     JSON.stringify(structure),
     note || "Saved OCR corrections",
     user?.id ?? null,
+  );
+  persistOcrGeometry(
+    id,
+    structure,
+    jsonArray(row.enhanced_paths_json),
+    jsonObject(row.pipeline_json),
+    jsonArray(row.source_paths_json),
+    jsonArray(row.source_filenames_json),
+  );
+  db.prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?").run(id, revision);
+  db.prepare(
+    "INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)",
+  ).run(
+    id,
+    revision,
+    preflight.ready ? 1 : 0,
+    preflight.score,
+    JSON.stringify(preflight.errors),
+    JSON.stringify(preflight.warnings),
+    JSON.stringify(preflight.checks),
   );
   audit(user?.id ?? null, "ocr.revise", "ocr_job", id, {
     revision,
@@ -1754,7 +2472,20 @@ async function restoreOcrRevision(request: Request, id: string, targetRevision: 
     Number(row.confidence || 0),
   );
   const nextRevision = Number(row.revision || 1) + 1;
-  const status = structure.stats.lowConfidenceBlocks > 0 ? "awaiting_correction" : "ready";
+  const metadata = normalizeMetadata(
+    jsonObject(revisionRow.metadata_json),
+    jsonObject(row.metadata_json),
+  );
+  const preflight = assessReconstructionQuality(structure, metadata);
+  if (Number(row.quality_score || 0) < 70)
+    preflight.errors.push({
+      severity: "error",
+      code: "ocr-quality",
+      message: "Overall OCR quality is below the verified-export threshold.",
+    });
+  preflight.ready = preflight.errors.length === 0;
+  const status = preflight.ready ? "ready" : "awaiting_correction";
+  const processingStage = preflight.ready ? "verified" : "awaiting_review";
   const note = `Restored revision ${targetRevision}`;
   const db = getDb();
   const correctedText = String(revisionRow.corrected_text || "");
@@ -1762,15 +2493,38 @@ async function restoreOcrRevision(request: Request, id: string, targetRevision: 
   const structureJson = String(revisionRow.structure_json || '{"version":1,"pages":[]}');
   db.prepare(
     `
-    UPDATE ocr_jobs SET corrected_text=?,metadata_json=?,structure_json=?,revision=?,status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?
+    UPDATE ocr_jobs SET corrected_text=?,metadata_json=?,structure_json=?,revision=?,status=?,processing_stage=?,updated_at=CURRENT_TIMESTAMP WHERE id=?
   `,
-  ).run(correctedText, metadataJson, structureJson, nextRevision, status, id);
+  ).run(correctedText, metadataJson, structureJson, nextRevision, status, processingStage, id);
   db.prepare(
     `
     INSERT INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by)
     VALUES(?,?,?,?,?,?,?)
   `,
   ).run(id, nextRevision, correctedText, metadataJson, structureJson, note, user?.id ?? null);
+  persistOcrGeometry(
+    id,
+    structure,
+    jsonArray(row.enhanced_paths_json),
+    jsonObject(row.pipeline_json),
+    jsonArray(row.source_paths_json),
+    jsonArray(row.source_filenames_json),
+  );
+  db.prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?").run(
+    id,
+    nextRevision,
+  );
+  db.prepare(
+    "INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)",
+  ).run(
+    id,
+    nextRevision,
+    preflight.ready ? 1 : 0,
+    preflight.score,
+    JSON.stringify(preflight.errors),
+    JSON.stringify(preflight.warnings),
+    JSON.stringify(preflight.checks),
+  );
   audit(user?.id ?? null, "ocr.restore", "ocr_job", id, {
     restoredRevision: targetRevision,
     revision: nextRevision,
@@ -1788,7 +2542,37 @@ function preflightOcrJob(request: Request, id: string) {
     String(row.corrected_text || row.extracted_text || ""),
     Number(row.confidence || 0),
   );
-  return json({ preflight: assessReconstructionQuality(structure, metadata) });
+  const result = assessReconstructionQuality(structure, metadata);
+  if (Number(row.quality_score || 0) < 70)
+    result.errors.push({
+      severity: "error",
+      code: "ocr-quality",
+      message: "Overall OCR quality is below the verified-export threshold.",
+    });
+  if (!isActualOcrText(String(row.extracted_text || row.corrected_text || "")))
+    result.errors.push({
+      severity: "error",
+      code: "missing-ocr-text",
+      message: "No actual OCR source text is available for verification.",
+    });
+  result.ready = result.errors.length === 0;
+  getDb()
+    .prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?")
+    .run(id, Number(row.revision || 1));
+  getDb()
+    .prepare(
+      "INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)",
+    )
+    .run(
+      id,
+      Number(row.revision || 1),
+      result.ready ? 1 : 0,
+      result.score,
+      JSON.stringify(result.errors),
+      JSON.stringify(result.warnings),
+      JSON.stringify(result.checks),
+    );
+  return json({ preflight: result });
 }
 
 async function exportOcrJob(request: Request, id: string, url: URL) {
@@ -1803,7 +2587,11 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
     Number(row.confidence || 0),
   );
   const format = url.searchParams.get("format") === "docx" ? "docx" : "pdf";
-  const layout = url.searchParams.get("layout") === "searchable" ? "searchable" : "clean";
+  const requestedMode = url.searchParams.get("mode");
+  const layout =
+    requestedMode === "searchable-scan" || url.searchParams.get("layout") === "searchable"
+      ? "searchable"
+      : "clean";
   const templateValue = url.searchParams.get("template");
   const template =
     templateValue && ["auto", "exam", "notes", "compact"].includes(templateValue)
@@ -1814,22 +2602,63 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
   const visualMode =
     visualValue && ["hybrid", "reconstruct", "source"].includes(visualValue)
       ? (visualValue as "hybrid" | "reconstruct" | "source")
-      : "hybrid";
+      : requestedMode === "clean"
+        ? "reconstruct"
+        : "hybrid";
   const reconstructionOptions = {
     template,
     preserveSourcePages: url.searchParams.get("sourcePages") === "preserve",
     preserveAnswerSpace: url.searchParams.get("answerSpace") !== "remove",
     showReviewHighlights: url.searchParams.get("reviewHighlights") !== "hide",
+    draft: url.searchParams.get("final") !== "1",
     sourceImagePaths: enhancedPaths,
     visualMode,
   };
-  const finalExport = url.searchParams.get("final") === "1";
+  const finalExport =
+    url.searchParams.get("final") === "1" || url.searchParams.get("status") === "verified";
+  const preflight = assessReconstructionQuality(structure, metadata);
+  if (finalExport) {
+    if (!isActualOcrText(String(row.extracted_text || row.corrected_text || "")))
+      throw new HttpError(422, "Verified export blocked: no actual OCR text was stored.", {
+        stage: "reconstructing",
+      });
+    if (Number(row.quality_score || 0) < 70 || !preflight.ready)
+      throw new HttpError(422, "Verified export blocked until OCR preflight passes.", preflight);
+  }
   const bytes =
     format === "docx"
       ? await createStructuredDocx(title, structure, reconstructionOptions)
       : layout === "searchable"
         ? await createSearchableScanPdf(title, structure, enhancedPaths)
         : await createStructuredPdf(title, structure, metadata, reconstructionOptions);
+  await mkdir(path.join(dataDir, "exports"), { recursive: true });
+  const exportPath = path.join(
+    dataDir,
+    "exports",
+    `${id}-revision-${Number(row.revision || 1)}-${finalExport ? "verified" : "draft"}.${format}`,
+  );
+  await writeFile(exportPath, bytes);
+  getDb()
+    .prepare(
+      "INSERT INTO ocr_exports(id,job_id,revision,format,mode,path,verified) VALUES(?,?,?,?,?,?,?)",
+    )
+    .run(
+      randomUUID(),
+      id,
+      Number(row.revision || 1),
+      format,
+      layout === "searchable" ? "searchable" : visualMode,
+      exportPath,
+      finalExport ? 1 : 0,
+    );
+  console.info("[EduSearch OCR] export", {
+    jobId: id,
+    revision: Number(row.revision || 1),
+    format,
+    verified: finalExport,
+    path: exportPath,
+    preflightScore: preflight.score,
+  });
   return new Response(arrayBufferBody(bytes), {
     headers: {
       "content-type":
@@ -1854,17 +2683,37 @@ async function publishOcrJob(request: Request, id: string) {
     String(row.corrected_text || row.extracted_text || ""),
     Number(row.confidence || 0),
   );
-  const text = ocrStructureToText(structure);
+  const text = ocrStructureToText(structure).trim();
+  const preflight = assessReconstructionQuality(structure, metadata);
+  if (!isActualOcrText(text) || Number(row.quality_score || 0) < 70 || !preflight.ready)
+    throw new HttpError(
+      422,
+      "Publication blocked until OCR preflight passes with verified source text.",
+      {
+        stage: "awaiting_review",
+        preflight,
+      },
+    );
   const documentId = uniqueDocumentId(metadata.title);
   const pdfBytes = await createStructuredPdf(metadata.title, structure, metadata, {
     template: "auto",
     preserveAnswerSpace: true,
     showReviewHighlights: false,
+    draft: false,
+    sourceImagePaths: jsonArray(row.enhanced_paths_json),
+    visualMode: "hybrid",
+  });
+  const docxBytes = await createStructuredDocx(metadata.title, structure, {
+    template: "auto",
+    preserveAnswerSpace: true,
+    draft: false,
     sourceImagePaths: jsonArray(row.enhanced_paths_json),
     visualMode: "hybrid",
   });
   const storagePath = path.join(dataDir, "uploads", `${documentId}.pdf`);
+  const docxStoragePath = path.join(dataDir, "uploads", `${documentId}.docx`);
   await writeFile(storagePath, pdfBytes);
+  await writeFile(docxStoragePath, docxBytes);
   const status = user.role === "admin" ? "published" : "awaiting_review";
   const contributorId = row.user_id ? String(row.user_id) : user.id;
   const rightsBasis = String(row.rights_basis || "public_domain");
@@ -1875,8 +2724,8 @@ async function publishOcrJob(request: Request, id: string) {
     INSERT INTO documents(
       id,title,subject,topics_json,doc_type,year,level,language,file_type,pages,size_bytes,institution,author,
       upload_source,description,keywords_json,original_filename,storage_path,extracted_text,status,uploaded_by,
-      rights_basis,source_attribution,rights_status
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      original_source_path,docx_storage_path,structure_json,ocr_job_id,rights_basis,source_attribution,rights_status
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `,
     )
     .run(
@@ -1901,13 +2750,37 @@ async function publishOcrJob(request: Request, id: string) {
       text,
       status,
       contributorId,
+      String(row.source_path),
+      docxStoragePath,
+      JSON.stringify(structure),
+      id,
       rightsBasis,
       sourceAttribution,
       "clear",
     );
-  getDb()
+  const documentDb = getDb();
+  const insertDocumentPage = documentDb.prepare(
+    "INSERT INTO document_pages(document_id,page_number,source_path,pdf_path,extracted_text,width,height) VALUES(?,?,?,?,?,?,?)",
+  );
+  const enhancedPaths = jsonArray(row.enhanced_paths_json);
+  for (const page of structure.pages)
+    insertDocumentPage.run(
+      documentId,
+      page.pageNumber,
+      enhancedPaths[page.pageNumber - 1] || String(row.source_path),
+      storagePath,
+      page.blocks.map((block) => block.text).join("\n\n"),
+      page.width,
+      page.height,
+    );
+  documentDb
     .prepare(
-      "UPDATE ocr_jobs SET status='published',published_document_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      "INSERT INTO ocr_exports(id,job_id,revision,format,mode,path,verified) VALUES(?,?,?,?,?,?,1)",
+    )
+    .run(randomUUID(), id, Number(row.revision || 1), "pdf", "hybrid", storagePath);
+  documentDb
+    .prepare(
+      "UPDATE ocr_jobs SET status='published',processing_stage='published',progress=100,current_stage='Published',published_document_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
     )
     .run(documentId, id);
   if (status === "published") {
@@ -3681,6 +4554,17 @@ function mapDocument(row: unknown, user: SessionUser | null, includeContent = fa
   };
 }
 
+function normalizeOcrStage(row: Record<string, unknown>) {
+  const status = String(row.status || "processing");
+  const stage = String(row.processing_stage || "");
+  if (status === "published") return "published";
+  if (status === "ready") return "verified";
+  if (status === "awaiting_correction") return "awaiting_review";
+  if (status === "failed") return "failed";
+  if (stage && stage !== "uploaded") return stage as any;
+  return "processing";
+}
+
 function mapOcrJob(row: Record<string, unknown>) {
   const structure = normalizeOcrStructure(
     jsonObject(row.structure_json),
@@ -3688,12 +4572,40 @@ function mapOcrJob(row: Record<string, unknown>) {
     Number(row.confidence || 0),
   );
   const enhancedPages = jsonArray(row.enhanced_paths_json);
+  const sourcePaths = jsonArray(row.source_paths_json);
+  const sourceFilenames = jsonArray(row.source_filenames_json);
+  const fallbackSourcePath = String(row.source_path || "");
+  const effectiveSourcePaths = sourcePaths.length
+    ? sourcePaths
+    : fallbackSourcePath
+      ? [fallbackSourcePath]
+      : [];
+  const effectiveSourceFilenames = sourceFilenames.length
+    ? sourceFilenames
+    : [String(row.original_filename || "scan")];
   const id = String(row.id);
+  const metadata = jsonObject(row.metadata_json);
+  const db = getDb();
+  const preflightRow = db
+    .prepare("SELECT * FROM ocr_preflight_results WHERE job_id=? AND revision=?")
+    .get(id, Number(row.revision || 1)) as Record<string, unknown> | undefined;
+  const preflight = preflightRow
+    ? {
+        ready: Number(preflightRow.ready || 0) === 1,
+        score: Number(preflightRow.score || 0),
+        errors: jsonArray<any>(preflightRow.errors_json),
+        warnings: jsonArray<any>(preflightRow.warnings_json),
+        checks: jsonArray<any>(preflightRow.checks_json),
+      }
+    : assessReconstructionQuality(structure, metadata);
   return {
     id,
     contributorUserId: row.user_id ? String(row.user_id) : undefined,
     originalFilename: String(row.original_filename),
     sourceUrl: `/api/ocr/jobs/${encodeURIComponent(id)}/source`,
+    sourcePaths: effectiveSourcePaths,
+    sourceFilenames: effectiveSourceFilenames,
+    combineAsDocument: Number(row.combine_as_document ?? 1) === 1,
     enhancedPaths: enhancedPages.map(
       (_, index) => `/api/ocr/jobs/${encodeURIComponent(id)}/pages/${index + 1}`,
     ),
@@ -3711,7 +4623,7 @@ function mapOcrJob(row: Record<string, unknown>) {
       String(row.ocr_quality_mode || "accurate"),
       String(row.ocr_language || "eng"),
     ),
-    metadata: jsonObject(row.metadata_json),
+    metadata,
     structure,
     revision: Number(row.revision || 1),
     publishedDocumentId: row.published_document_id ? String(row.published_document_id) : undefined,
@@ -3721,6 +4633,26 @@ function mapOcrJob(row: Record<string, unknown>) {
     rightsDeclaredBy: row.rights_declared_by ? String(row.rights_declared_by) : undefined,
     rightsDeclaredAt: row.rights_declared_at ? String(row.rights_declared_at) : undefined,
     status: String(row.status),
+    processingStage: normalizeOcrStage(row),
+    progress: Number(row.progress || (row.status === "processing" ? 50 : 100)),
+    pagesCompleted: Number(row.pages_completed || structure.stats.pages || 0),
+    totalPages: Number(
+      row.total_pages || effectiveSourcePaths.length || structure.stats.pages || 1,
+    ),
+    currentStage: String(
+      row.current_stage ||
+        (row.status === "processing"
+          ? "Processing OCR..."
+          : row.status === "published"
+            ? "Published"
+            : preflight.ready
+              ? "Verified"
+              : "Awaiting review"),
+    ),
+    diagnostics: jsonObject(row.diagnostics_json),
+    documentType: String(row.document_type || "exam"),
+    ready: preflight.ready,
+    preflight,
     errorMessage: row.error_message ? String(row.error_message) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),

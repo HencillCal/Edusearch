@@ -114,6 +114,7 @@ export type OcrBlock = {
   needsReview: boolean;
   reviewed: boolean;
   questionNumber?: string;
+  parentId?: string;
   marks?: number;
   bbox?: { left: number; top: number; width: number; height: number };
   agreement?: number;
@@ -133,6 +134,30 @@ export type OcrBlock = {
   caption?: string;
 };
 
+export type OcrWord = {
+  text: string;
+  confidence: number;
+  x: number;
+  y: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  page: number;
+  line: number;
+};
+
+export type OcrLine = {
+  text: string;
+  confidence: number;
+  bbox: { x: number; y: number; left: number; top: number; width: number; height: number };
+  words: OcrWord[];
+  page: number;
+  line: number;
+  agreement?: number;
+  needsReview?: boolean;
+};
+
 export type OcrStructure = {
   version: 1;
   pages: Array<{
@@ -141,6 +166,8 @@ export type OcrStructure = {
     height: number;
     confidence: number;
     blocks: OcrBlock[];
+    lines?: OcrLine[];
+    words?: OcrWord[];
   }>;
   stats: {
     pages: number;
@@ -148,14 +175,29 @@ export type OcrStructure = {
     lowConfidenceBlocks: number;
     questions: number;
     totalMarks: number;
+    marksDetected?: number;
+    documentTotal?: number;
+    questionTotals?: Record<string, number>;
+    sectionTotals?: Record<string, number>;
+    declaredTotalMarks?: number;
+    marksTotalConsistent?: boolean;
   };
 };
 
 export type OcrPipelineReport = {
-  engine: "native-tesseract" | "tesseract-js" | "pdf-text-layer";
-  profile: "exam" | "notes" | "table" | "mixed";
+  engine: "native-tesseract" | "tesseract-js" | "pdf-text-layer" | "vision-provider";
+  profile: "auto" | "exam" | "notes" | "table" | "mixed";
   qualityMode: "fast" | "balanced" | "accurate";
   language: string;
+  documentType:
+    | "exam"
+    | "notes"
+    | "assignment"
+    | "marking_scheme"
+    | "practical"
+    | "course_outline"
+    | "research_document"
+    | "mixed";
   qualityScore: number;
   orientationCorrection: number;
   skewAngle: number;
@@ -194,6 +236,13 @@ export type OcrPipelineReport = {
   preservedVisuals: number;
   exportReadiness: number;
   warnings: string[];
+  selectedProvider?: string;
+  providerAttempts?: Array<{
+    provider: string;
+    model?: string;
+    keySlot?: number;
+    outcome: string;
+  }>;
 };
 
 export type OcrJob = {
@@ -201,14 +250,33 @@ export type OcrJob = {
   contributorUserId?: string;
   originalFilename: string;
   sourceUrl: string;
+  sourcePaths: string[];
+  sourceFilenames: string[];
+  pageCount: number;
+  progress: number;
+  pagesCompleted: number;
+  currentStage: string;
   enhancedPaths: string[];
   extractedText: string;
   correctedText: string;
   confidence: number;
   qualityScore: number;
-  profile: "exam" | "notes" | "table" | "mixed";
+  profile: "auto" | "exam" | "notes" | "table" | "mixed";
   language: string;
   qualityMode: "fast" | "balanced" | "accurate";
+  stage:
+    | "uploaded"
+    | "preprocessing"
+    | "ocr_running"
+    | "ocr_completed"
+    | "layout_analysis"
+    | "reconstructing"
+    | "awaiting_review"
+    | "verified"
+    | "failed"
+    | "published"
+    | string;
+  diagnostics: Record<string, unknown>;
   pipeline: OcrPipelineReport;
   metadata: Record<string, unknown>;
   structure: OcrStructure;
@@ -256,6 +324,8 @@ export type OcrPreflight = {
     hasTitle: boolean;
     hasInstitution: boolean;
     totalMarks: number;
+    declaredTotalMarks?: number;
+    marksTotalConsistent?: boolean;
   };
 };
 

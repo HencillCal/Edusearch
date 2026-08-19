@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import net from "node:net";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,8 +11,10 @@ import sharp from "sharp";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { Document, HeadingLevel, Packer, PageBreak, Paragraph, TextRun } from "docx";
 import { HttpError } from "./auth";
+import { runVisionProviderCascade } from "./ocr/provider-router";
 
 const execFileAsync = promisify(execFile);
+const nodeRequire = createRequire(import.meta.url);
 export const dataDir = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), "data"));
 const MAX_FILE_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
 const allowedExtensions = new Set([
@@ -21,7 +24,12 @@ const allowedExtensions = new Set([
   ".jpeg",
   ".png",
   ".webp",
+  ".bmp",
+  ".gif",
+  ".tif",
+  ".tiff",
   ".heic",
+  ".heif",
   ".zip",
 ]);
 
@@ -34,14 +42,56 @@ export type StoredInput = {
   sha256: string;
 };
 
-export type OcrProfile = "exam" | "notes" | "table" | "mixed";
+export type OcrProfile = "auto" | "exam" | "notes" | "table" | "mixed";
 export type OcrQualityMode = "fast" | "balanced" | "accurate";
+export type OcrDocumentType =
+  | "exam"
+  | "notes"
+  | "assignment"
+  | "marking_scheme"
+  | "practical"
+  | "course_outline"
+  | "research_document"
+  | "mixed";
+
+export type OcrWord = {
+  text: string;
+  confidence: number;
+  x: number;
+  y: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  page: number;
+  line: number;
+};
+
+export type OcrLineRecord = {
+  text: string;
+  confidence: number;
+  bbox: { x: number; y: number; left: number; top: number; width: number; height: number };
+  words: OcrWord[];
+  page: number;
+  line: number;
+  agreement?: number;
+  needsReview?: boolean;
+};
+
+export type OCRWord = OcrWord;
+export type OCRLine = OcrLineRecord;
 
 export type OcrPipelineReport = {
-  engine: "native-tesseract" | "tesseract-js" | "pdf-text-layer" | "visual-analyzer";
+  engine:
+    | "native-tesseract"
+    | "tesseract-js"
+    | "pdf-text-layer"
+    | "visual-analyzer"
+    | "vision-provider";
   profile: OcrProfile;
   qualityMode: OcrQualityMode;
   language: string;
+  documentType: OcrDocumentType;
   qualityScore: number;
   orientationCorrection: number;
   skewAngle: number;
@@ -75,11 +125,18 @@ export type OcrPipelineReport = {
   handwritingRisk: number;
   tableGridScore: number;
   lineDensity: number;
-  exportReadiness: number;
   detectedFigures: number;
   detectedTables: number;
   preservedVisuals: number;
+  exportReadiness: number;
   warnings: string[];
+  selectedProvider?: string;
+  providerAttempts?: Array<{
+    provider: string;
+    model?: string;
+    keySlot?: number;
+    outcome: string;
+  }>;
   pages?: OcrPipelineReport[];
 };
 
@@ -139,6 +196,8 @@ export type OcrPageStructure = {
   height: number;
   confidence: number;
   blocks: OcrBlock[];
+  lines?: OcrLineRecord[];
+  words?: OcrWord[];
 };
 
 export type OcrStructure = {
@@ -150,8 +209,46 @@ export type OcrStructure = {
     lowConfidenceBlocks: number;
     questions: number;
     totalMarks: number;
+    marksDetected?: number;
+    documentTotal?: number;
+    questionTotals?: Record<string, number>;
+    sectionTotals?: Record<string, number>;
+    declaredTotalMarks?: number;
+    marksTotalConsistent?: boolean;
   };
 };
+
+export type OcrPageEdit = {
+  rotation?: number;
+  crop?: { left: number; top: number; width: number; height: number };
+};
+
+export async function prepareOcrPage(sourcePath: string, edit: OcrPageEdit = {}) {
+  const rotation = Number(edit.rotation || 0);
+  const metadata = await sharp(sourcePath, { limitInputPixels: 160_000_000 }).metadata();
+  const sourceWidth = Number(metadata.width || 0);
+  const sourceHeight = Number(metadata.height || 0);
+  let image = sharp(sourcePath, { limitInputPixels: 160_000_000 }).rotate(rotation);
+  if (edit.crop && sourceWidth > 0 && sourceHeight > 0) {
+    const left = Math.max(0, Math.min(sourceWidth - 1, Math.floor(edit.crop.left)));
+    const top = Math.max(0, Math.min(sourceHeight - 1, Math.floor(edit.crop.top)));
+    const width = Math.max(1, Math.min(sourceWidth - left, Math.floor(edit.crop.width)));
+    const height = Math.max(1, Math.min(sourceHeight - top, Math.floor(edit.crop.height)));
+    image = image.extract({ left, top, width, height });
+  }
+  if (!rotation && !edit.crop) return sourcePath;
+  await ensureStorage();
+  const destination = path.join(
+    dataDir,
+    "ocr",
+    `${Date.now()}-manual-${createHash("sha1")
+      .update(`${sourcePath}:${JSON.stringify(edit)}`)
+      .digest("hex")
+      .slice(0, 12)}.png`,
+  );
+  await image.png().toFile(destination);
+  return destination;
+}
 
 type OcrLine = {
   text: string;

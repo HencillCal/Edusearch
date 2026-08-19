@@ -82,8 +82,48 @@ export function assertSameOrigin(request: Request) {
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) return;
   const origin = request.headers.get("origin");
   if (!origin) return;
-  const expected = new URL(request.url).origin;
-  if (origin !== expected) throw new HttpError(403, "Cross-origin request rejected.");
+
+  const requestUrl = new URL(request.url);
+  const forwardedProto =
+    request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() ||
+    requestUrl.protocol.slice(0, -1);
+  const forwardedHost =
+    request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+    request.headers.get("host") ||
+    requestUrl.host;
+  const expectedOrigins = new Set([requestUrl.origin, `${forwardedProto}://${forwardedHost}`]);
+
+  if (expectedOrigins.has(origin)) return;
+  const configuredOrigins = [
+    process.env.APP_ORIGIN,
+    ...(process.env.ALLOWED_ORIGINS || "").split(","),
+  ]
+    .map((value) =>
+      String(value || "")
+        .trim()
+        .replace(/\/$/, ""),
+    )
+    .filter(Boolean);
+  if (configuredOrigins.includes(origin.replace(/\/$/, ""))) return;
+
+  // Arena's live preview terminates TLS at the preview proxy and forwards the
+  // mutation to the local Vite/Nitro listener. In that hop request.url can be
+  // localhost even though the browser Origin is the trusted preview host.
+  try {
+    const originUrl = new URL(origin);
+    const trustedPreview =
+      originUrl.hostname === "arena.ai" ||
+      originUrl.hostname.endsWith(".arena.ai") ||
+      originUrl.hostname.endsWith(".e2b.app");
+    const internalTarget =
+      /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(requestUrl.hostname) ||
+      /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?$/i.test(forwardedHost);
+    if (trustedPreview && internalTarget) return;
+  } catch {
+    // Fall through to the normal same-origin rejection below.
+  }
+
+  throw new HttpError(403, "Cross-origin request rejected.");
 }
 
 function shouldUseSecureCookie(request: Request) {
