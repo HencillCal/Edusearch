@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Copy,
   Download,
   FileClock,
   FileText,
@@ -81,7 +82,7 @@ function ScannerPage() {
   const [structure, setStructure] = useState<OcrStructure | null>(null);
   const [metadata, setMetadata] = useState<Record<string, unknown>>({});
   const [selectedPage, setSelectedPage] = useState(1);
-  const [mode, setMode] = useState<"structured" | "raw">("structured");
+  const [mode, setMode] = useState<"structured" | "raw">("raw");
   const [rawText, setRawText] = useState("");
   const [saving, setSaving] = useState(false);
   const [revisionNote, setRevisionNote] = useState("");
@@ -684,17 +685,18 @@ function ScannerPage() {
                   <div className="flex flex-wrap gap-2">
                     <Button
                       size="sm"
-                      variant={mode === "structured" ? "default" : "outline"}
-                      onClick={() => setMode("structured")}
-                    >
-                      Structured
-                    </Button>
-                    <Button
-                      size="sm"
                       variant={mode === "raw" ? "default" : "outline"}
                       onClick={() => setMode("raw")}
                     >
-                      Raw text
+                      <FileText className="mr-1.5 size-3.5" />
+                      Unified Text Editor
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={mode === "structured" ? "default" : "outline"}
+                      onClick={() => setMode("structured")}
+                    >
+                      Advanced Block Editor
                     </Button>
                   </div>
                 </div>
@@ -775,42 +777,65 @@ function ScannerPage() {
                   ))}
                 </div>
 
-                {mode === "raw" ? (
-                  <textarea
-                    value={rawText}
-                    onChange={(event) => setRawText(event.target.value)}
-                    className="mt-4 h-[620px] w-full resize-y rounded-lg border border-border bg-background p-4 font-mono text-sm leading-relaxed outline-none focus:border-brand"
-                  />
-                ) : (
-                  <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                    <div className="min-w-0 rounded-lg border border-border bg-surface p-3">
+                <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                  <div className="min-w-0 rounded-lg border border-border bg-surface p-3">
+                    <div className="mb-3 flex items-center justify-between">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Enhanced original · page {selectedPage}
+                      </p>
+                      <Badge variant="outline">{Math.round(currentPage?.confidence || 0)}%</Badge>
+                    </div>
+                    {enhancedPageUrl ? (
+                      <img
+                        src={enhancedPageUrl}
+                        alt={`Enhanced OCR page ${selectedPage}`}
+                        className="max-h-[720px] w-full rounded border border-border bg-white object-contain"
+                      />
+                    ) : sourceIsPdf ? (
+                      <iframe
+                        title="Original PDF"
+                        src={`${job.sourceUrl}#page=${selectedPage}`}
+                        className="h-[720px] w-full rounded border border-border bg-white"
+                      />
+                    ) : (
+                      <img
+                        src={job.sourceUrl}
+                        alt="Original academic document"
+                        className="max-h-[720px] w-full rounded border border-border bg-white object-contain"
+                      />
+                    )}
+                  </div>
+
+                  {mode === "raw" ? (
+                    <div className="flex min-w-0 flex-col rounded-lg border border-border bg-surface p-3">
                       <div className="mb-3 flex items-center justify-between">
                         <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          Enhanced original · page {selectedPage}
+                          Extracted Document Text
                         </p>
-                        <Badge variant="outline">{Math.round(currentPage?.confidence || 0)}%</Badge>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground">
+                            {rawText.split(/\s+/).filter(Boolean).length} words · {rawText.length} chars
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              navigator.clipboard.writeText(rawText);
+                              toast.success("Extracted text copied to clipboard!");
+                            }}
+                          >
+                            <Copy className="mr-1 size-3.5" /> Copy
+                          </Button>
+                        </div>
                       </div>
-                      {enhancedPageUrl ? (
-                        <img
-                          src={enhancedPageUrl}
-                          alt={`Enhanced OCR page ${selectedPage}`}
-                          className="max-h-[720px] w-full rounded border border-border bg-white object-contain"
-                        />
-                      ) : sourceIsPdf ? (
-                        <iframe
-                          title="Original PDF"
-                          src={`${job.sourceUrl}#page=${selectedPage}`}
-                          className="h-[720px] w-full rounded border border-border bg-white"
-                        />
-                      ) : (
-                        <img
-                          src={job.sourceUrl}
-                          alt="Original academic document"
-                          className="max-h-[720px] w-full rounded border border-border bg-white object-contain"
-                        />
-                      )}
+                      <textarea
+                        value={rawText}
+                        onChange={(event) => setRawText(event.target.value)}
+                        placeholder="Extracted text will appear here..."
+                        className="h-[680px] w-full resize-none rounded-lg border border-border bg-background p-4 font-mono text-sm leading-relaxed outline-none focus:border-brand"
+                      />
                     </div>
-
+                  ) : (
                     <div className="min-w-0 rounded-lg border border-border bg-surface p-3">
                       <div className="mb-3 flex items-center justify-between">
                         <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
