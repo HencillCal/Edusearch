@@ -1521,9 +1521,9 @@ async function compatibilityExtract(request: Request) {
     );
     generatedPaths = result.enhancedPaths.filter(Boolean);
     const failedPages = new Map(result.pageErrors.map((page: { page: number; error: string }) => [page.page, page.error]));
-    const results = result.structure.pages.map((page: OcrPageStructure, index: number) => {
+    const results = result.structure.pages.map((page: any, index: number) => {
       const text = page.blocks
-        .map((block: OcrBlock) => block.text)
+        .map((block: any) => block.text)
         .join("\n\n")
         .trim();
       return {

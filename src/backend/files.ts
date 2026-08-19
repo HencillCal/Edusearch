@@ -3294,33 +3294,6 @@ function cleanText(value: string) {
     .trim();
 }
 
-export type OcrPageEdit = {
-  rotate?: number;
-  crop?: { left: number; top: number; width: number; height: number };
-};
-
-export async function prepareOcrPage(imagePath: string, edits: OcrPageEdit): Promise<string> {
-  if (!edits.rotate && !edits.crop) return imagePath;
-  try {
-    let pipeline = sharp(imagePath);
-    if (edits.rotate) pipeline = pipeline.rotate(edits.rotate);
-    if (edits.crop && edits.crop.width > 10 && edits.crop.height > 10) {
-      pipeline = pipeline.extract({
-        left: Math.max(0, Math.round(edits.crop.left)),
-        top: Math.max(0, Math.round(edits.crop.top)),
-        width: Math.round(edits.crop.width),
-        height: Math.round(edits.crop.height),
-      });
-    }
-    const outputPath = path.join(path.dirname(imagePath), `prepared-${Date.now()}-${path.basename(imagePath)}.png`);
-    await pipeline.toFile(outputPath);
-    return outputPath;
-  } catch (error) {
-    console.warn("Failed to apply page edits:", error);
-    return imagePath;
-  }
-}
-
 export async function runMultiPageOcr(
   inputs: Array<{ path: string; originalName: string }>,
   options: OcrRunOptions = {},
@@ -3433,3 +3406,5 @@ export async function ocrEngineHealth() {
     concurrency: Number(process.env.OCR_CONCURRENCY || 3),
   };
 }
+
+
