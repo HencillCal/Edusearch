@@ -44,9 +44,13 @@ See `UPGRADE-V12.md` and `VALIDATION-V12.md`. All V11 verified-export controls a
 - PDF, DOCX, image, multi-file and ZIP upload staging
 - SHA-256 duplicate detection and optional ClamAV virus scanning
 - PDF/DOCX text extraction with digital-text-first PDF analysis and automatic scanned-page fallback
-- High-accuracy OCR using deskew, trim, upscale, grayscale, gamma, contrast, threshold, sharpen, denoise and multi-pass candidate selection
+- High-accuracy OCR using EXIF rotation, optional OpenCV page/perspective correction, deskew, trim, upscale, grayscale, gamma, contrast, adaptive/Otsu thresholding, sharpen, denoise and multi-pass candidate selection
+- Durable background OCR jobs with explicit upload, preprocessing, OCR, layout, reconstruction, review, verification, failure and publication stages; failures retain diagnostics instead of returning placeholder text
+- Tesseract word/line geometry persisted in dedicated OCR page, word, line and block tables for columns, marks, hierarchy, tables, formulas and visual crops
+- Automatic exam/notes/assignment/marking-scheme document classification with exam hierarchy, wrapped-line joining, question-number, subquestion, mark-total and inconsistency detection
 - Exam, notes, table and mixed-document OCR profiles with fast, balanced and accurate modes
 - Structured page-by-page OCR reconstruction, typed academic blocks, confidence review, version history and clean/searchable PDF plus DOCX generation
+- Server-side preflight gates verified PDF/DOCX export and publication; OCR drafts are visibly marked `OCR DRAFT — REVIEW REQUIRED`
 - Document moderation states: draft, awaiting review, published, rejected, changes requested and archived
 - Real preview, download, view and download counters
 - Saved documents, starter collections and contributor upload history APIs

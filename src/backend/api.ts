@@ -4616,6 +4616,8 @@ function mapOcrJob(row: Record<string, unknown>) {
     profile: String(row.ocr_profile || "exam"),
     language: String(row.ocr_language || "eng"),
     qualityMode: String(row.ocr_quality_mode || "accurate"),
+    stage: normalizeOcrStage(row),
+    diagnostics: jsonObject(row.diagnostics_json),
     pipeline: normalizePipelineReport(
       jsonObject(row.pipeline_json),
       Number(row.quality_score || row.confidence || 0),
@@ -4672,6 +4674,7 @@ function normalizePipelineReport(
     profile,
     qualityMode,
     language,
+    documentType: String(raw.documentType || inferOcrDocumentType(raw.documentType || "mixed")),
     qualityScore: Number(raw.qualityScore ?? fallbackQuality),
     orientationCorrection: Number(raw.orientationCorrection || 0),
     skewAngle: Number(raw.skewAngle || 0),
@@ -4821,6 +4824,7 @@ function inferMetadata(filename: string, text: string, fileType: string, pages: 
 
 function inferDocType(value: string) {
   if (/marking scheme|memo|answers|solution/.test(value)) return "Marking scheme";
+  if (/examination|exam paper|past paper|end of semester|end of term/.test(value)) return "Exam";
   if (/assignment|coursework/.test(value)) return "Assignment";
   if (/practical|laboratory|lab manual/.test(value)) return "Practical paper";
   if (/lecture slide|presentation|powerpoint/.test(value)) return "Lecture slides";

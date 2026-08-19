@@ -171,6 +171,7 @@ export type OcrBlock = {
   needsReview: boolean;
   reviewed: boolean;
   questionNumber?: string;
+  parentId?: string;
   marks?: number;
   bbox?: { left: number; top: number; width: number; height: number };
   agreement?: number;
@@ -257,6 +258,9 @@ type OcrLine = {
   top: number;
   width: number;
   height: number;
+  page?: number;
+  line?: number;
+  words?: OcrWord[];
   agreement?: number;
   alternatives?: string[];
   originalText?: string;
@@ -297,7 +301,7 @@ type PagePreprocessReport = {
 
 export async function ensureStorage() {
   await Promise.all(
-    ["uploads", "staging", "ocr", "exports", "compliance"].map((folder) =>
+    ["uploads", "staging", "ocr", "exports", "compliance", "tessdata"].map((folder) =>
       mkdir(path.join(dataDir, folder), { recursive: true }),
     ),
   );
@@ -459,9 +463,10 @@ export async function expandZip(file: StoredInput) {
 }
 
 async function parsePdfText(filePath: string) {
-  // @ts-ignore
+  // @ts-expect-error pdf-parse exposes this legacy subpath without a TypeScript declaration.
   const parserModule = await import("pdf-parse/lib/pdf-parse.js");
-  type PdfTextItem = { str?: string; transform?: number[] };
+  const pageLines: OcrLine[][] = [];
+  type PdfTextItem = { str?: string; transform?: number[]; width?: number; height?: number };
   type PdfPage = {
     getTextContent: (options?: Record<string, unknown>) => Promise<{ items?: PdfTextItem[] }>;
   };
@@ -476,20 +481,68 @@ async function parsePdfText(filePath: string) {
         normalizeWhitespace: false,
         disableCombineTextItems: false,
       });
+      const currentPage = pageLines.length + 1;
+      const groups = new Map<number, OcrWord[]>();
       let output = "";
       let previousY: number | null = null;
       for (const item of content.items ?? []) {
         const value = String(item.str || "").trim();
         if (!value) continue;
-        const y = Array.isArray(item.transform) ? Number(item.transform[5]) : Number.NaN;
-        const lineBreak = previousY != null && Number.isFinite(y) && Math.abs(y - previousY) > 4;
+        const transform = Array.isArray(item.transform) ? item.transform : [];
+        const baselineY = Number(transform[5]);
+        const x = Number(transform[4]);
+        const width = Number(item.width || transform[0] || 0);
+        const height = Math.abs(Number(item.height || transform[3] || 12));
+        const top = Number.isFinite(baselineY) ? Math.max(0, Math.round(-baselineY)) : 0;
+        const lineKey = Number.isFinite(baselineY) ? Math.round(baselineY / 4) * 4 : output.length;
+        const word: OcrWord = {
+          text: value,
+          confidence: 99,
+          x: Math.max(0, Math.round(x || 0)),
+          y: top,
+          left: Math.max(0, Math.round(x || 0)),
+          top,
+          width: Math.max(0, Math.round(width)),
+          height: Math.max(1, Math.round(height)),
+          page: currentPage,
+          line: 1,
+        };
+        groups.set(lineKey, [...(groups.get(lineKey) || []), word]);
+        const lineBreak =
+          previousY != null && Number.isFinite(baselineY) && Math.abs(baselineY - previousY) > 4;
         output += `${lineBreak ? "\n" : output ? " " : ""}${value}`;
-        if (Number.isFinite(y)) previousY = y;
+        if (Number.isFinite(baselineY)) previousY = baselineY;
       }
-      return `${output.trim()}\n\f\n`;
+      const lines: OcrLine[] = [...groups.entries()]
+        .sort(([left], [right]) => right - left)
+        .map(([, words], index) => {
+          const orderedWords = words.sort((left, right) => left.left - right.left);
+          const left = Math.min(...orderedWords.map((word) => word.left));
+          const top = Math.min(...orderedWords.map((word) => word.top));
+          const right = Math.max(...orderedWords.map((word) => word.left + word.width));
+          const bottom = Math.max(...orderedWords.map((word) => word.top + word.height));
+          orderedWords.forEach((word) => (word.line = index + 1));
+          return {
+            text: orderedWords.map((word) => word.text).join(" "),
+            confidence: 99,
+            left,
+            top,
+            width: Math.max(0, right - left),
+            height: Math.max(1, bottom - top),
+            page: currentPage,
+            line: index + 1,
+            words: orderedWords,
+          };
+        });
+      pageLines.push(lines);
+      return `${output.trim()}\f\n`;
     },
   });
-  return { text: cleanText(result.text ?? "").replace(/\f\s*$/, ""), pages: result.numpages || 1 };
+  return {
+    text: cleanText(result.text ?? "").replace(/\f\s*$/, ""),
+    pages: result.numpages || 1,
+    lines: pageLines,
+  };
 }
 
 export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) {
@@ -500,6 +553,7 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
   const nativeAvailable = await commandAvailable("tesseract");
   const passes = selectOcrPasses(options, prepared.variants, nativeAvailable);
   const candidates: OcrCandidate[] = [];
+  const passErrors: Array<{ pass: string; error: string }> = [];
 
   for (const pass of passes) {
     try {
@@ -513,14 +567,22 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
             pass.name,
             options.profile,
           );
-        } catch {
-          candidate = await recognizeWithTesseractJs(
-            pass.path,
-            options.language,
-            pass.psm,
-            pass.name,
-            options.profile,
-          );
+        } catch (nativeError) {
+          try {
+            candidate = await recognizeWithTesseractJs(
+              pass.path,
+              options.language,
+              pass.psm,
+              pass.name,
+              options.profile,
+            );
+          } catch (fallbackError) {
+            passErrors.push({
+              pass: pass.name,
+              error: `native: ${errorMessage(nativeError)}; fallback: ${errorMessage(fallbackError)}`,
+            });
+            throw fallbackError;
+          }
         }
       } else {
         candidate = await recognizeWithTesseractJs(
@@ -532,8 +594,10 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
         );
       }
       if (candidate.text.trim()) candidates.push(candidate);
-    } catch {
-      // Continue trying next pass if one pass times out or fails
+    } catch (error) {
+      if (!passErrors.some((item) => item.pass === pass.name))
+        passErrors.push({ pass: pass.name, error: errorMessage(error) });
+      // Continue trying next pass if one pass times out or fails.
     }
   }
 
@@ -547,34 +611,27 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
         options.profile,
       );
       if (directPass.text.trim()) candidates.push(directPass);
-    } catch {
-      // Continue
+    } catch (error) {
+      passErrors.push({ pass: "direct-source", error: errorMessage(error) });
     }
   }
 
   if (!candidates.length) {
-    const imageInfo = await sharp(prepared.enhancedPath).metadata();
-    const width = Number(imageInfo.width || 1200);
-    const height = Number(imageInfo.height || 1600);
-    const fallbackText = "Scanned Document Text";
-    candidates.push({
-      name: "source-text",
-      engine: "tesseract-js",
-      psm: 3,
-      text: fallbackText,
-      confidence: 70,
-      score: 65,
-      lines: [
-        {
-          text: fallbackText,
-          confidence: 70,
-          left: Math.round(width * 0.1),
-          top: Math.round(height * 0.1),
-          width: Math.round(width * 0.8),
-          height: 35,
-        },
-      ],
-    });
+    await Promise.all(
+      prepared.temporaryPaths.map((temporaryPath) => rm(temporaryPath, { force: true })),
+    );
+    throw new HttpError(
+      422,
+      "OCR completed without readable source text. Try a clearer image, a higher-resolution scan, correcting page orientation, another OCR language, or Accurate mode.",
+      {
+        stage: "ocr_running",
+        engineAvailable: nativeAvailable,
+        attemptedPasses: passes.map((pass) => ({ name: pass.name, psm: pass.psm })),
+        passErrors,
+        enhancedPath: prepared.enhancedPath,
+        diagnostics: prepared.preprocess,
+      },
+    );
   }
   candidates.sort((left, right) => right.score - left.score);
   const primary = candidates[0];
@@ -599,6 +656,24 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
     .map((line) => line.text)
     .join("\n")
     .trim();
+  if (!hasReadableOcrText(text)) {
+    await Promise.all(
+      prepared.temporaryPaths.map((temporaryPath) => rm(temporaryPath, { force: true })),
+    );
+    throw new HttpError(
+      422,
+      "OCR completed but no readable source text was found. Try a clearer image, a higher-resolution scan, correcting page orientation, another OCR language, or Accurate mode.",
+      {
+        stage: "ocr_completed",
+        diagnostics: {
+          extractedCharacters: text.length,
+          suspiciousCharacterRate: calculateSuspiciousCharacterRate(text),
+          acceptedPass: primary.name,
+          attemptedPasses: candidates.map((candidate) => candidate.name),
+        },
+      },
+    );
+  }
   const structure = buildOcrStructureFromPages(
     [
       {
@@ -613,6 +688,7 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
   );
   injectDetectedPageRegions(structure.pages[0], prepared.preprocess);
   refreshOcrStructureStats(structure);
+  const documentType = detectDocumentType(text, structure, options.profile);
   const suspiciousCharacterRate = calculateSuspiciousCharacterRate(text);
   const qualityScore = calculateOcrQualityScore(
     confidence,
@@ -625,6 +701,7 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
     profile: options.profile,
     qualityMode: options.qualityMode,
     language: options.language,
+    documentType,
     qualityScore,
     orientationCorrection: prepared.orientationCorrection,
     skewAngle: prepared.skewAngle,
@@ -680,18 +757,46 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
   };
 }
 
+function buildPdfTextStructure(
+  pages: OcrLine[][],
+  fallbackText: string,
+  confidence: number,
+  profile: OcrProfile,
+) {
+  if (!pages.length || !pages.some((page) => page.length))
+    return buildOcrStructure(fallbackText, confidence);
+  return buildOcrStructureFromPages(
+    pages.map((lines, index) => ({
+      pageNumber: index + 1,
+      width: Math.max(0, ...lines.map((line) => line.left + line.width)),
+      height: Math.max(0, ...lines.map((line) => line.top + line.height)),
+      confidence,
+      lines,
+    })),
+    profile,
+  );
+}
+
 export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {}) {
   const startedAt = Date.now();
   const options = normalizeOcrOptions(requested);
   const extracted = await parsePdfText(sourcePath);
   const directQuality = assessExtractedTextQuality(extracted.text, extracted.pages);
   if (!options.forceImageOcr && extracted.text.trim() && directQuality >= 82) {
-    const structure = buildOcrStructure(extracted.text, 99);
+    const textLayerConfidence = directQuality;
+    const structure = buildPdfTextStructure(
+      extracted.lines,
+      extracted.text,
+      textLayerConfidence,
+      options.profile,
+    );
+    const documentType = detectDocumentType(extracted.text, structure, options.profile);
     const pipeline: OcrPipelineReport = {
       engine: "pdf-text-layer",
       profile: options.profile,
       qualityMode: options.qualityMode,
       language: options.language,
+      documentType,
       qualityScore: directQuality,
       orientationCorrection: 0,
       skewAngle: 0,
@@ -705,7 +810,7 @@ export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {
           name: "embedded-text-layer",
           engine: "pdf-text-layer",
           psm: 0,
-          confidence: 99,
+          confidence: textLayerConfidence,
           score: directQuality,
           characters: extracted.text.length,
         },
@@ -735,7 +840,7 @@ export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {
     };
     return {
       text: extracted.text,
-      confidence: 99,
+      confidence: textLayerConfidence,
       enhancedPaths: [],
       structure,
       pipeline,
@@ -758,12 +863,19 @@ export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {
     );
   } catch {
     if (extracted.text.trim()) {
-      const structure = buildOcrStructure(extracted.text, Math.max(75, directQuality));
+      const structure = buildPdfTextStructure(
+        extracted.lines,
+        extracted.text,
+        Math.max(75, directQuality),
+        options.profile,
+      );
+      const documentType = detectDocumentType(extracted.text, structure, options.profile);
       const pipeline: OcrPipelineReport = {
         engine: "pdf-text-layer",
         profile: options.profile,
         qualityMode: options.qualityMode,
         language: options.language,
+        documentType,
         qualityScore: directQuality,
         orientationCorrection: 0,
         skewAngle: 0,
@@ -863,6 +975,8 @@ export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {
   const qualityScore = Math.round(average(qualityScores, confidence));
   harmonizeMultiPageStructure(structures);
   const structure = finalizeOcrStructure(structures);
+  const combinedText = pages.join("\n\n--- PAGE BREAK ---\n\n");
+  const documentType = detectDocumentType(combinedText, structure, options.profile);
   const pageConsistency = calculatePageConsistency(structures, pageReports);
   const pipeline: OcrPipelineReport = {
     engine: pageReports.some((report) => report.engine === "native-tesseract")
@@ -871,6 +985,7 @@ export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {
     profile: options.profile,
     qualityMode: options.qualityMode,
     language: options.language,
+    documentType,
     qualityScore,
     orientationCorrection: round(
       average(
@@ -977,7 +1092,7 @@ export async function runPdfOcr(sourcePath: string, requested: OcrRunOptions = {
     pages: pageReports,
   };
   return {
-    text: pages.join("\n\n--- PAGE BREAK ---\n\n"),
+    text: combinedText,
     confidence,
     enhancedPaths,
     structure,
@@ -1551,7 +1666,10 @@ async function prepareOcrVariants(sourcePath: string, options: NormalizedOcrOpti
       "Final-coordinate visual analysis was unavailable, so source-region crops were disabled to prevent misaligned PDF output.",
     );
   }
-  const variants: OcrVariant[] = [{ name: "clean", path: enhancedPath }];
+  const variants: OcrVariant[] = [
+    { name: "clean", path: enhancedPath },
+    { name: "original-clean", path: sourcePath },
+  ];
   const sidecarPaths = [preprocess.adaptivePath, preprocess.lineFreePath].filter(
     (item): item is string => Boolean(item && existsSync(item)),
   );
@@ -1633,12 +1751,19 @@ function selectOcrPasses(
   nativeAvailable = true,
 ) {
   const variant = (name: string) => variants.find((item) => item.name === name) ?? variants[0];
-  if (options.qualityMode === "fast" || !nativeAvailable)
+  if (options.qualityMode === "fast")
     return [
+      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
+      { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
+    ];
+  if (!nativeAvailable)
+    return [
+      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
-    ].slice(0, nativeAvailable ? 2 : 2);
+    ];
   const accurate = [
+    { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
     { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
     { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     {
@@ -1740,33 +1865,67 @@ async function recognizeWithTesseractJs(
   profile: OcrProfile,
 ): Promise<OcrCandidate> {
   const timeoutMs = Number(process.env.OCR_PASS_TIMEOUT_MS || 25_000);
-  const tesseract = await import("tesseract.js");
-  const recognize = tesseract.recognize as unknown as (
-    image: string,
-    language: string,
+  const tesseractModule = nodeRequire("tesseract.js") as {
+    default?: Record<string, unknown>;
+    createWorker?: (...args: unknown[]) => Promise<unknown>;
+  };
+  const tesseract = tesseractModule.default || tesseractModule;
+  const createWorker = tesseract.createWorker as unknown as (
+    languages: string,
+    oem: number,
     options?: Record<string, unknown>,
-    output?: Record<string, boolean>,
-  ) => Promise<{ data: Record<string, unknown> }>;
-
-  const recognizePromise = recognize(
-    imagePath,
-    language,
-    {
-      tessedit_pageseg_mode: String(psm),
-      preserve_interword_spaces: "1",
-      user_defined_dpi: "300",
-    },
-    { tsv: true, blocks: true },
+  ) => Promise<{
+    setParameters: (parameters: Record<string, string>) => Promise<unknown>;
+    recognize: (
+      image: string,
+      options?: Record<string, unknown>,
+      output?: Record<string, boolean>,
+    ) => Promise<{ data: Record<string, unknown> }>;
+    terminate: () => Promise<unknown>;
+  }>;
+  const bundledLangPath = path.join(
+    process.cwd(),
+    "node_modules",
+    "@tesseract.js-data",
+    "eng",
+    "4.0.0",
   );
-
+  const configuredLangPath = process.env.OCR_TESSDATA_PATH
+    ? path.resolve(process.env.OCR_TESSDATA_PATH)
+    : bundledLangPath;
+  const hasLocalLanguage =
+    language === "eng" && existsSync(path.join(configuredLangPath, "eng.traineddata.gz"));
+  const workerOptions = hasLocalLanguage
+    ? {
+        langPath: configuredLangPath,
+        cachePath: path.join(dataDir, "tessdata"),
+        gzip: true,
+      }
+    : {};
+  const recognizeWithWorker = async () => {
+    const worker = await createWorker(language, 1, workerOptions);
+    try {
+      await worker.setParameters({
+        tessedit_pageseg_mode: String(psm),
+        preserve_interword_spaces: "1",
+        user_defined_dpi: "300",
+      });
+      return await worker.recognize(
+        imagePath,
+        { rotateAuto: true },
+        { text: true, tsv: true, blocks: true },
+      );
+    } finally {
+      await worker.terminate().catch(() => undefined);
+    }
+  };
   const timeoutPromise = new Promise<{ data: Record<string, unknown> }>((_, reject) =>
     setTimeout(
       () => reject(new Error(`OCR pass '${name}' timed out after ${timeoutMs}ms`)),
       timeoutMs,
     ),
   );
-
-  const result = await Promise.race([recognizePromise, timeoutPromise]);
+  const result = await Promise.race([recognizeWithWorker(), timeoutPromise]);
   const data = result.data;
   const fallbackText = String(data.text || "");
   const confidence = Number(data.confidence || 0);
@@ -1782,6 +1941,9 @@ async function recognizeWithTesseractJs(
     score: scoreOcrCandidate(text, lineConfidence, lines),
     lines,
   };
+}
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error || "unknown OCR error");
 }
 
 const commandAvailability = new Map<string, boolean>();
@@ -2203,6 +2365,14 @@ function calculateOcrQualityScore(
   );
 }
 
+function hasReadableOcrText(text: string) {
+  const compact = text.replace(/\s/g, "");
+  if (compact.length < 4) return false;
+  const lettersAndNumbers = (compact.match(/[\p{L}\p{N}]/gu) || []).length;
+  const suspicious = calculateSuspiciousCharacterRate(text);
+  return lettersAndNumbers >= 4 && lettersAndNumbers / compact.length >= 0.35 && suspicious < 0.35;
+}
+
 function assessExtractedTextQuality(text: string, pages: number) {
   const compact = text.replace(/\s/g, "");
   if (!compact) return 0;
@@ -2288,6 +2458,9 @@ export function normalizeOcrStructure(
           (agreement != null && agreement < 0.58),
         reviewed: Boolean(blockObject.reviewed),
         ...(questionNumber ? { questionNumber } : {}),
+        ...(typeof blockObject.parentId === "string" && blockObject.parentId.trim()
+          ? { parentId: blockObject.parentId.slice(0, 100) }
+          : {}),
         ...(marks != null ? { marks } : {}),
         ...(agreement != null ? { agreement } : {}),
         ...(Array.isArray(blockObject.alternatives)
@@ -2405,6 +2578,7 @@ export function normalizeOcrStructure(
           : {}),
       });
     }
+    const normalizedLines = normalizeOcrLines(pageObject.lines, pageNumber, fallbackConfidence);
     pages.push({
       pageNumber,
       width: boundedInt(pageObject.width, 0, 0, 100_000),
@@ -2419,6 +2593,12 @@ export function normalizeOcrStructure(
         100,
       ),
       blocks,
+      ...(normalizedLines.length
+        ? {
+            lines: normalizedLines,
+            words: normalizedLines.flatMap((line) => line.words),
+          }
+        : {}),
     });
   }
   return pages.length
@@ -2478,9 +2658,35 @@ function parseTesseractTsv(
         height: 20,
       }))
       .filter((line) => line.text);
-  const header = rows[0].split("\t");
+  const firstRow = rows[0].split("\t");
+  const hasHeader = firstRow.includes("text") && firstRow.includes("conf");
+  const header = hasHeader
+    ? firstRow
+    : [
+        "level",
+        "page_num",
+        "block_num",
+        "par_num",
+        "line_num",
+        "word_num",
+        "left",
+        "top",
+        "width",
+        "height",
+        "conf",
+        "text",
+      ];
   const index = Object.fromEntries(header.map((name, position) => [name, position]));
-  type Word = { text: string; left: number; width: number; confidence: number };
+  type Word = {
+    text: string;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    confidence: number;
+    page: number;
+    line: number;
+  };
   const groups = new Map<
     string,
     {
@@ -2492,7 +2698,7 @@ function parseTesseractTsv(
       bottom: number;
     }
   >();
-  for (const row of rows.slice(1)) {
+  for (const row of rows.slice(hasHeader ? 1 : 0)) {
     const columns = row.split("\t");
     const text = String(columns[index.text] || "").trim();
     if (!text) continue;
@@ -2515,7 +2721,16 @@ function parseTesseractTsv(
       right: left + width,
       bottom: top + height,
     };
-    group.words.push({ text, left, width, confidence });
+    group.words.push({
+      text,
+      left,
+      top,
+      width,
+      height,
+      confidence,
+      page: Number(columns[index.page_num] || 1),
+      line: Number(columns[index.line_num] || 1),
+    });
     if (Number.isFinite(confidence) && confidence >= 0) group.confidences.push(confidence);
     group.left = Math.min(group.left, left);
     group.top = Math.min(group.top, top);
@@ -2581,6 +2796,18 @@ function parseTesseractTsv(
             top: group.top,
             width: Math.max(0, right - left),
             height: Math.max(0, group.bottom - group.top),
+            words: segment.map((word) => ({
+              text: word.text,
+              confidence: boundedNumber(word.confidence, fallbackConfidence, 0, 100),
+              x: word.left,
+              y: word.top,
+              left: word.left,
+              top: word.top,
+              width: word.width,
+              height: word.height,
+              page: word.page,
+              line: word.line,
+            })),
             ...(tableLike ? { cells } : {}),
           };
         });
@@ -2610,6 +2837,33 @@ function buildOcrStructureFromPages(
       ),
     ),
   );
+}
+
+function repairLikelyDroppedQuestionPrefix(blocks: OcrBlock[]) {
+  const questions = blocks.filter(
+    (block) => block.type === "question" && /^\d+$/.test(block.questionNumber || ""),
+  );
+  for (let index = 0; index < questions.length - 1; index += 1) {
+    const current = questions[index];
+    const next = questions[index + 1];
+    const currentNumber = Number(current.questionNumber);
+    const nextNumber = Number(next.questionNumber);
+    if (
+      currentNumber >= 0 &&
+      currentNumber < 10 &&
+      nextNumber >= 10 &&
+      nextNumber - currentNumber === 11
+    ) {
+      const inferred = String(nextNumber - 1);
+      current.alternatives = [
+        ...new Set([current.questionNumber || "", inferred, ...(current.alternatives || [])]),
+      ].filter(Boolean);
+      current.questionNumber = inferred;
+      current.needsReview = true;
+      current.reviewReason =
+        "The leading digit of this question number may have been dropped by OCR; compare it with the source image.";
+    }
+  }
 }
 
 function buildOcrPage(
@@ -2750,6 +3004,50 @@ ${line.text}`
       bbox: { left: line.left, top: line.top, width: line.width, height: line.height },
     });
   }
+  repairLikelyDroppedQuestionPrefix(blocks);
+  const markCandidates = lines.flatMap((line) => {
+    if (/section|instructions?|answer\s+any|total\s+marks?|maximum\s+marks?/i.test(line.text))
+      return [];
+    const match =
+      line.text.match(/(?:\[|\(|\b)(\d{1,3})\s*marks?\s*(?:\]|\))?/i) ||
+      line.text.match(/\[(\d{1,3})\]/);
+    return match ? [{ line, marks: Number(match[1]) }] : [];
+  });
+  for (const candidate of markCandidates) {
+    const possible = blocks
+      .filter(
+        (block) =>
+          (block.type === "question" || block.type === "subquestion") &&
+          block.marks == null &&
+          block.bbox,
+      )
+      .map((block) => ({
+        block,
+        distance: Math.abs((block.bbox?.top || 0) - candidate.line.top),
+        horizontalDistance: Math.abs((block.bbox?.left || 0) - candidate.line.left),
+      }))
+      .filter((item) => item.distance <= 180)
+      .sort(
+        (left, right) =>
+          left.distance - right.distance || left.horizontalDistance - right.horizontalDistance,
+      );
+    const target = possible[0]?.block;
+    if (!target) continue;
+    target.marks = candidate.marks;
+    target.needsReview = target.confidence < 70 || (target.agreement ?? 1) < 0.58;
+  }
+  let currentQuestionId: string | undefined;
+  let currentSubquestionId: string | undefined;
+  for (const block of blocks) {
+    if (block.type === "question") {
+      currentQuestionId = block.id;
+      currentSubquestionId = undefined;
+    } else if (block.type === "subquestion" && currentQuestionId) {
+      const roman = /^[ivxlcdm]+$/i.test(block.questionNumber || "");
+      block.parentId = roman ? currentSubquestionId || currentQuestionId : currentQuestionId;
+      if (!roman) currentSubquestionId = block.id;
+    }
+  }
   const medianHeight = median(
     blocks.map((block) => block.bbox?.height || 0).filter((value) => value > 0),
     18,
@@ -2762,6 +3060,27 @@ ${line.text}`
     if (gap > medianHeight * 1.8)
       current.spacingAfter = Math.min(72, Math.round((gap / height) * 700));
   }
+  const lineRecords: OcrLineRecord[] = lines.map((line, index) => ({
+    text: line.text,
+    confidence: boundedNumber(line.confidence, confidence, 0, 100),
+    bbox: {
+      x: Math.max(0, Math.round(line.left)),
+      y: Math.max(0, Math.round(line.top)),
+      left: Math.max(0, Math.round(line.left)),
+      top: Math.max(0, Math.round(line.top)),
+      width: Math.max(0, Math.round(line.width)),
+      height: Math.max(0, Math.round(line.height)),
+    },
+    words: (line.words || []).map((word) => ({
+      ...word,
+      page: pageNumber,
+      line: index + 1,
+    })),
+    page: pageNumber,
+    line: index + 1,
+    ...(line.agreement != null ? { agreement: line.agreement } : {}),
+    ...(line.confidence < 70 || (line.agreement ?? 1) < 0.58 ? { needsReview: true } : {}),
+  }));
   return {
     pageNumber,
     width,
@@ -2771,7 +3090,69 @@ ${line.text}`
       confidence,
     ),
     blocks,
+    lines: lineRecords,
+    words: lineRecords.flatMap((line) => line.words),
   };
+}
+
+export function detectDocumentType(
+  text: string,
+  structure: OcrStructure,
+  profile: OcrProfile = "mixed",
+): OcrDocumentType {
+  const haystack = text.toLowerCase();
+  const blocks = structure.pages.flatMap((page) => page.blocks).filter((block) => !block.repeated);
+  if (/marking\s+scheme|answer\s+key|model\s+answers|memo\b/.test(haystack))
+    return "marking_scheme";
+  if (/course\s+outline|course\s+syllabus|learning\s+outcomes|weekly\s+schedule/.test(haystack))
+    return "course_outline";
+  if (/research\s+paper|thesis|dissertation|abstract\b|methodology\b/.test(haystack))
+    return "research_document";
+  if (/practical\s+(?:exam|assessment|test)|laboratory\s+manual|lab\s+report/.test(haystack))
+    return "practical";
+  if (/\bassignment\b|coursework|take[- ]home\s+task/.test(haystack)) return "assignment";
+  const questions = blocks.filter(
+    (block) => block.type === "question" || block.type === "subquestion",
+  ).length;
+  const marks = blocks.filter((block) => block.marks != null).length;
+  const instructions = blocks.filter((block) => block.type === "instruction").length;
+  if (
+    questions >= 2 ||
+    marks >= 1 ||
+    instructions >= 1 ||
+    /end\s+of\s+(?:semester|term)|examination\b|exam\s+paper|duration\s*:|total\s+marks/.test(
+      haystack,
+    )
+  )
+    return "exam";
+  if (profile === "notes" || blocks.some((block) => block.type === "section")) return "notes";
+  return "mixed";
+}
+
+function wordToNumber(value: string) {
+  const values: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+    eighteen: 18,
+    nineteen: 19,
+    twenty: 20,
+  };
+  return values[value.toLowerCase()] || 0;
 }
 
 function classifyOcrLine(
@@ -2792,15 +3173,31 @@ function classifyOcrLine(
       questionNumber: question[1],
       marks,
     };
-  const subquestion = text.match(/^\(?([a-z]|[ivxlcdm]{1,5})\)[.)\]:-]?\s*(.*)$/i);
+  const wordQuestion = text.match(
+    /^question\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b\s*[:.)-]?\s*(.*)$/i,
+  );
+  if (wordQuestion)
+    return {
+      type: "question",
+      text: wordQuestion[2].trim() || text,
+      questionNumber: String(wordToNumber(wordQuestion[1])),
+      marks,
+    };
+  const subquestion = text.match(
+    /^(?:\(([a-z]|[ivxlcdm]{1,5})\)|([a-z]|[ivxlcdm]{1,5})[.)])\s+(.*)$/i,
+  );
   if (subquestion)
     return {
       type: "subquestion",
-      text: subquestion[2].trim() || text,
-      questionNumber: subquestion[1],
+      text: subquestion[3].trim() || text,
+      questionNumber: subquestion[1] || subquestion[2],
       marks,
     };
-  if (/^(instructions?|answer\s+(all|any)|time\s+allowed|read\s+carefully)\b/i.test(text))
+  if (
+    /^(instructions?|attempt\s+(?:all|any)|answer\s+(?:all|any)|time\s+allowed|read\s+carefully|show\s+all\s+workings?)\b/i.test(
+      text,
+    )
+  )
     return { type: "instruction", text, marks };
   if (/^(section|part)\s+[a-z0-9]+\b/i.test(text)) return { type: "section", text, marks };
   if (
@@ -2985,8 +3382,49 @@ function injectDetectedPageRegions(
   });
 }
 
+function calculateMarkTotals(blocks: OcrBlock[]) {
+  const questionBlocks = blocks.filter((block) => block.type === "question");
+  const questionTotals: Record<string, number> = {};
+  for (const question of questionBlocks) {
+    if (!question.questionNumber) continue;
+    const childMarks = blocks
+      .filter((block) => block.parentId === question.id)
+      .reduce((sum, block) => sum + (block.marks || 0), 0);
+    questionTotals[question.questionNumber] = question.marks != null ? question.marks : childMarks;
+  }
+  const hasMainQuestionTotals = Object.keys(questionTotals).length > 0;
+  const documentTotal = hasMainQuestionTotals
+    ? Object.values(questionTotals).reduce((sum, value) => sum + value, 0)
+    : blocks.reduce((sum, block) => sum + (block.marks || 0), 0);
+  const sectionTotals: Record<string, number> = {};
+  const declaredCandidates = blocks.flatMap((block) => {
+    if (!/section|total\s+marks?|maximum\s+marks?/i.test(block.text)) return [];
+    const match = block.text.match(/(?:section|total|maximum)[^\d]{0,30}(\d{1,3})\s*marks?/i);
+    return match ? [Number(match[1])] : [];
+  });
+  let currentSection = "";
+  for (const block of blocks) {
+    if (block.type === "section") {
+      currentSection = block.text.trim().slice(0, 120);
+      sectionTotals[currentSection] ||= 0;
+    }
+    if (block.type === "question" && block.questionNumber && currentSection)
+      sectionTotals[currentSection] += questionTotals[block.questionNumber] || 0;
+  }
+  return {
+    marksDetected: blocks.filter((block) => block.marks != null).length,
+    documentTotal,
+    declaredTotalMarks: declaredCandidates.length ? Math.max(...declaredCandidates) : undefined,
+    marksTotalConsistent:
+      !declaredCandidates.length || Math.max(...declaredCandidates) === documentTotal,
+    questionTotals,
+    sectionTotals,
+  };
+}
+
 function refreshOcrStructureStats(structure: OcrStructure) {
   const blocks = structure.pages.flatMap((page) => page.blocks).filter((block) => !block.repeated);
+  const marks = calculateMarkTotals(blocks);
   structure.stats = {
     pages: structure.pages.length,
     blocks: blocks.length,
@@ -2997,7 +3435,8 @@ function refreshOcrStructureStats(structure: OcrStructure) {
     ).length,
     questions: blocks.filter((block) => block.type === "question" || block.type === "subquestion")
       .length,
-    totalMarks: blocks.reduce((sum, block) => sum + (block.marks || 0), 0),
+    totalMarks: marks.documentTotal,
+    ...marks,
   };
 }
 
@@ -3013,6 +3452,7 @@ function finalizeOcrStructure(pages: OcrPageStructure[]): OcrStructure {
   }));
   markRepeatedPageFurniture(normalized);
   const blocks = normalized.flatMap((page) => page.blocks).filter((block) => !block.repeated);
+  const marks = calculateMarkTotals(blocks);
   return {
     version: 1,
     pages: normalized,
@@ -3026,9 +3466,76 @@ function finalizeOcrStructure(pages: OcrPageStructure[]): OcrStructure {
       ).length,
       questions: blocks.filter((block) => block.type === "question" || block.type === "subquestion")
         .length,
-      totalMarks: blocks.reduce((sum, block) => sum + (block.marks || 0), 0),
+      totalMarks: marks.documentTotal,
+      ...marks,
     },
   };
+}
+
+function normalizeOcrLines(value: unknown, pageNumber: number, fallbackConfidence: number) {
+  if (!Array.isArray(value)) return [] as OcrLineRecord[];
+  return value.slice(0, 10_000).flatMap((rawLine, index) => {
+    if (!rawLine || typeof rawLine !== "object" || Array.isArray(rawLine)) return [];
+    const source = rawLine as Record<string, unknown>;
+    const bboxSource =
+      source.bbox && typeof source.bbox === "object" && !Array.isArray(source.bbox)
+        ? (source.bbox as Record<string, unknown>)
+        : source;
+    const text = String(source.text || "")
+      .replace(/\0/g, "")
+      .trim()
+      .slice(0, 20_000);
+    if (!text) return [];
+    const lineNumber = boundedInt(source.line, index + 1, 1, 100_000);
+    const words = Array.isArray(source.words)
+      ? source.words.slice(0, 500).flatMap((rawWord, wordIndex) => {
+          if (!rawWord || typeof rawWord !== "object" || Array.isArray(rawWord)) return [];
+          const word = rawWord as Record<string, unknown>;
+          const wordText = String(word.text || "")
+            .trim()
+            .slice(0, 2_000);
+          if (!wordText) return [];
+          return [
+            {
+              text: wordText,
+              confidence: boundedNumber(word.confidence, fallbackConfidence, 0, 100),
+              x: boundedInt(word.x ?? word.left, 0, 0, 100_000),
+              y: boundedInt(word.y ?? word.top, 0, 0, 100_000),
+              left: boundedInt(word.left ?? word.x, 0, 0, 100_000),
+              top: boundedInt(word.top ?? word.y, 0, 0, 100_000),
+              width: boundedInt(word.width, 0, 0, 100_000),
+              height: boundedInt(word.height, 0, 0, 100_000),
+              page: pageNumber,
+              line: lineNumber || wordIndex + 1,
+            } satisfies OcrWord,
+          ];
+        })
+      : [];
+    const confidence = boundedNumber(source.confidence, fallbackConfidence, 0, 100);
+    const agreement =
+      source.agreement == null ? undefined : boundedNumber(source.agreement, 1, 0, 1);
+    return [
+      {
+        text,
+        confidence,
+        bbox: {
+          x: boundedInt(bboxSource.x ?? bboxSource.left, 0, 0, 100_000),
+          y: boundedInt(bboxSource.y ?? bboxSource.top, 0, 0, 100_000),
+          left: boundedInt(bboxSource.left ?? bboxSource.x, 0, 0, 100_000),
+          top: boundedInt(bboxSource.top ?? bboxSource.y, 0, 0, 100_000),
+          width: boundedInt(bboxSource.width, 0, 0, 100_000),
+          height: boundedInt(bboxSource.height, 0, 0, 100_000),
+        },
+        words,
+        page: pageNumber,
+        line: lineNumber,
+        ...(agreement != null ? { agreement } : {}),
+        ...(source.needsReview === true || confidence < 70 || (agreement ?? 1) < 0.58
+          ? { needsReview: true }
+          : {}),
+      } satisfies OcrLineRecord,
+    ];
+  });
 }
 
 function normalizeBlockType(value: unknown): OcrBlockType {
@@ -3073,6 +3580,8 @@ function median(values: number[], fallback = 0) {
 }
 
 export async function createPdf(title: string, text: string) {
+  if (!text.trim())
+    throw new HttpError(422, "Cannot generate a PDF without extracted source text.");
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -3148,6 +3657,8 @@ export async function createPdf(title: string, text: string) {
 }
 
 export async function createDocx(title: string, text: string) {
+  if (!text.trim())
+    throw new HttpError(422, "Cannot generate a DOCX without extracted source text.");
   const children = [
     new Paragraph({ text: title, heading: HeadingLevel.TITLE, spacing: { after: 320 } }),
   ];

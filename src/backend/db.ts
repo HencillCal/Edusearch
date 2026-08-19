@@ -90,6 +90,10 @@ export function initializeDatabase() {
       downloads INTEGER NOT NULL DEFAULT 0,
       rating REAL NOT NULL DEFAULT 0,
       uploaded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      original_source_path TEXT,
+      docx_storage_path TEXT,
+      structure_json TEXT NOT NULL DEFAULT '{}',
+      ocr_job_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );

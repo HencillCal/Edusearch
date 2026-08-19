@@ -4,6 +4,7 @@ import {
   AlignmentType,
   Document,
   Footer,
+  Header,
   HeadingLevel,
   ImageRun,
   PageBreak,
@@ -27,6 +28,7 @@ export type PdfReconstructionOptions = {
   preserveSourcePages?: boolean;
   preserveAnswerSpace?: boolean;
   showReviewHighlights?: boolean;
+  draft?: boolean;
   sourceImagePaths?: string[];
   visualMode?: PdfVisualMode;
   draft?: boolean;
@@ -378,7 +380,7 @@ export async function createStructuredPdf(
     }
 
     if (block.type === "question" || block.type === "subquestion") {
-      const indent = block.type === "subquestion" ? 24 : 0;
+      const indent = block.type === "subquestion" ? 24 * getBlockDepth(block, structure) : 0;
       const number = formatQuestionNumber(block);
       const questionText = stripMarksFromText(text, block.marks);
       const marks = block.marks != null ? `${block.marks} mark${block.marks === 1 ? "" : "s"}` : "";
@@ -558,19 +560,15 @@ export async function createStructuredPdf(
     }
   }
 
-  if (!sortedPages.length) {
-    const fallback = String(metadata.description || "No reconstructed content was available.");
-    await renderBlock({
-      id: "fallback",
-      page: 1,
-      order: 0,
-      type: "paragraph",
-      text: fallback,
-      confidence: 100,
-      needsReview: false,
-      reviewed: true,
-    });
-  }
+  if (
+    !sortedPages.length ||
+    !sortedPages.some((sourcePage) =>
+      sourcePage.blocks.some(
+        (block) => block.text.trim() && !block.repeated && block.type !== "footer",
+      ),
+    )
+  )
+    throw new Error("Cannot generate a PDF because OCR reconstruction contains no source text.");
 
   const pages = pdf.getPages();
   pages.forEach((current: PDFPage, index: number) =>
@@ -594,7 +592,9 @@ async function renderSourceVisualBlock(
   request: VisualRenderRequest,
 ): Promise<{ cursorY: number; consumed: boolean } | null> {
   const { block, visualMode } = request;
-  if (block.text && block.text.trim().length >= 10 && block.type !== "figure") return null;
+  const markedVisual = Boolean(block.preserveAsImage || block.visualKind);
+  if (block.text && block.text.trim().length >= 10 && block.type !== "figure" && !markedVisual)
+    return null;
   const region = block.sourceRegion || block.bbox;
   const sourcePath = request.sourceImagePaths[Math.max(0, block.page - 1)];
   if (!sourcePath || !region || visualMode === "reconstruct") return null;
@@ -849,7 +849,10 @@ export async function createStructuredDocx(
         children.push(
           new Paragraph({
             children: [new TextRun({ text, bold: block.type === "question" })],
-            indent: block.type === "subquestion" ? { left: 360 } : undefined,
+            indent:
+              block.type === "subquestion"
+                ? { left: 360 * getBlockDepth(block, structure) }
+                : undefined,
             spacing: { before: 100, after: Math.max(100, spacingAfter), line: 300 },
             keepNext: true,
           }),
@@ -898,14 +901,38 @@ export async function createStructuredDocx(
       }
     }
   }
-  if (!children.length) children.push(new Paragraph("No reconstructed content was available."));
+  if (!children.length)
+    throw new Error("Cannot generate a DOCX because OCR reconstruction contains no source text.");
+  if (requested.draft)
+    children.unshift(
+      new Paragraph({
+        text: "OCR DRAFT — REVIEW REQUIRED",
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 220 },
+      }),
+    );
   const document = new Document({
     creator: "EduSearch AI",
     title,
     description: `Academic document reconstructed by EduSearch AI OCR · ${template} layout`,
     sections: [
       {
-        properties: {},
+        properties: {
+          page: {
+            size: { width: 11906, height: 16838 },
+            margin: { top: 1080, right: 1080, bottom: 900, left: 1080, header: 540, footer: 540 },
+          },
+        },
+        headers: {
+          default: new Header({
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [new TextRun({ text: title, size: 15, color: "6B7280" })],
+              }),
+            ],
+          }),
+        },
         footers: {
           default: new Footer({
             children: [
@@ -987,6 +1014,24 @@ async function createDocxVisualParagraphs(
       }),
     );
   return { paragraphs, consumed: true };
+}
+
+function getBlockDepth(block: OcrBlock, structure: OcrStructure) {
+  if (!block.parentId) return 1;
+  const byId = new Map(
+    structure.pages.flatMap((page) => page.blocks).map((candidate) => [candidate.id, candidate]),
+  );
+  let depth = 1;
+  let parentId = block.parentId;
+  const seen = new Set<string>();
+  while (parentId && !seen.has(parentId) && depth < 5) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent?.parentId) break;
+    depth += 1;
+    parentId = parent.parentId;
+  }
+  return depth;
 }
 
 function resolveTemplate(
@@ -1238,6 +1283,8 @@ export type ReconstructionPreflight = {
     hasTitle: boolean;
     hasInstitution: boolean;
     totalMarks: number;
+    declaredTotalMarks?: number;
+    marksTotalConsistent?: boolean;
   };
 };
 
