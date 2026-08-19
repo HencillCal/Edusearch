@@ -3805,11 +3805,21 @@ function cleanText(value: string) {
     .trim();
 }
 
+export type MultiPageOcrResult = {
+  enhancedPaths: string[];
+  text: string;
+  confidence: number;
+  qualityScore: number;
+  structure: OcrStructure;
+  pipeline: OcrPipelineReport;
+  pageErrors: Array<{ page: number; error: string }>;
+};
+
 export async function runMultiPageOcr(
   inputs: Array<{ path: string; originalName: string }>,
   options: OcrRunOptions = {},
   onProgress?: (progress: { page: number; total: number; stage: string }) => void,
-): Promise<OcrResult> {
+): Promise<MultiPageOcrResult> {
   const pageErrors: Array<{ page: number; error: string }> = [];
   const enhancedPaths: string[] = [];
   const pages: OcrPageStructure[] = [];

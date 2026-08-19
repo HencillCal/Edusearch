@@ -4617,7 +4617,6 @@ function mapOcrJob(row: Record<string, unknown>) {
     language: String(row.ocr_language || "eng"),
     qualityMode: String(row.ocr_quality_mode || "accurate"),
     stage: normalizeOcrStage(row),
-    diagnostics: jsonObject(row.diagnostics_json),
     pipeline: normalizePipelineReport(
       jsonObject(row.pipeline_json),
       Number(row.quality_score || row.confidence || 0),
