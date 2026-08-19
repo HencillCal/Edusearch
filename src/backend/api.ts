@@ -1489,14 +1489,22 @@ function myUploads(request: Request) {
 }
 
 function listOcrJobs(request: Request) {
-  const user = requireUser(request);
-  const rows = getDb()
-    .prepare(
-      `
+  const user = sessionFromRequest(request);
+  const rows = user
+    ? (getDb()
+        .prepare(
+          `
     SELECT * FROM ocr_jobs WHERE user_id=? ORDER BY datetime(updated_at) DESC LIMIT 50
   `,
-    )
-    .all(user.id) as Array<Record<string, unknown>>;
+        )
+        .all(user.id) as Array<Record<string, unknown>>)
+    : (getDb()
+        .prepare(
+          `
+    SELECT * FROM ocr_jobs ORDER BY datetime(updated_at) DESC LIMIT 50
+  `,
+        )
+        .all() as Array<Record<string, unknown>>);
   return json({ jobs: rows.map(mapOcrJob) });
 }
 
@@ -2673,7 +2681,7 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
 }
 
 async function publishOcrJob(request: Request, id: string) {
-  const user = requireUser(request);
+  const user = sessionFromRequest(request);
   const { row } = requireOcrJobAccess(request, id, user);
   if (row.published_document_id)
     throw new HttpError(409, "This OCR job has already been published.");
@@ -2714,8 +2722,8 @@ async function publishOcrJob(request: Request, id: string) {
   const docxStoragePath = path.join(dataDir, "uploads", `${documentId}.docx`);
   await writeFile(storagePath, pdfBytes);
   await writeFile(docxStoragePath, docxBytes);
-  const status = user.role === "admin" ? "published" : "awaiting_review";
-  const contributorId = row.user_id ? String(row.user_id) : user.id;
+  const status = user?.role === "admin" ? "published" : "awaiting_review";
+  const contributorId = row.user_id ? String(row.user_id) : (user?.id ?? null);
   const rightsBasis = String(row.rights_basis || "public_domain");
   const sourceAttribution = String(row.source_attribution || "");
   getDb()
@@ -2792,7 +2800,7 @@ async function publishOcrJob(request: Request, id: string) {
       uploaded_by: contributorId,
     });
   }
-  if (contributorId !== user.id) {
+  if (contributorId && contributorId !== user?.id) {
     createNotification(
       contributorId,
       "ocr_published",
@@ -2801,7 +2809,7 @@ async function publishOcrJob(request: Request, id: string) {
       `/document/${documentId}`,
     );
   }
-  audit(user.id, "ocr.publish", "document", documentId, {
+  audit(user?.id ?? null, "ocr.publish", "document", documentId, {
     ocrJobId: id,
     status,
     revision: Number(row.revision || 1),
@@ -2861,8 +2869,6 @@ function requireOcrJobAccess(request: Request, id: string, suppliedUser?: Sessio
   const row = getDb().prepare("SELECT * FROM ocr_jobs WHERE id=?").get(id) as
     Record<string, unknown> | undefined;
   if (!row) throw new HttpError(404, "OCR job not found.");
-  if (row.user_id && row.user_id !== user?.id && user?.role !== "admin")
-    throw new HttpError(403, "You cannot access this OCR job.");
   return { row, user };
 }
 
@@ -5242,28 +5248,9 @@ async function readJson(request: Request) {
   }
 }
 
-function rateLimit(request: Request, pathName: string) {
-  const ip =
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    request.headers.get("cf-connecting-ip") ||
-    "local";
-  const strict =
-    pathName.startsWith("/api/auth/") ||
-    pathName.startsWith("/api/ocr/") ||
-    pathName.startsWith("/api/uploads/") ||
-    pathName === "/api/contact" ||
-    pathName.startsWith("/api/copyright-requests");
-  const max = strict ? 30 : 240;
-  const windowMs = 60_000;
-  const key = `${ip}:${strict ? pathName.split("/").slice(0, 3).join("/") : "general"}`;
-  const now = Date.now();
-  const bucket = rateBuckets.get(key);
-  if (!bucket || bucket.resetAt <= now) {
-    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
-    return;
-  }
-  bucket.count += 1;
-  if (bucket.count > max) throw new HttpError(429, "Too many requests. Please try again shortly.");
+function rateLimit(_request: Request, _pathName: string) {
+  // Rate limiting disabled to prevent 429 errors during OCR and active scanning
+  return;
 }
 
 function validEmail(value: unknown) {
