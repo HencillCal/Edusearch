@@ -1520,10 +1520,10 @@ async function compatibilityExtract(request: Request) {
       { profile, qualityMode: "balanced", language },
     );
     generatedPaths = result.enhancedPaths.filter(Boolean);
-    const failedPages = new Map(result.pageErrors.map((page) => [page.page, page.error]));
-    const results = result.structure.pages.map((page, index) => {
+    const failedPages = new Map(result.pageErrors.map((page: { page: number; error: string }) => [page.page, page.error]));
+    const results = result.structure.pages.map((page: OcrPageStructure, index: number) => {
       const text = page.blocks
-        .map((block) => block.text)
+        .map((block: OcrBlock) => block.text)
         .join("\n\n")
         .trim();
       return {
@@ -1786,7 +1786,7 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
             language: options.language,
             forceImageOcr: options.forceImageOcr,
           },
-          (progress) => updateOcrProgress(id, progress),
+          (progress: { page: number; total: number; stage: string }) => updateOcrProgress(id, progress),
         );
     assertOcrJobActive(id);
     updateOcrProcessingStage(id, "ocr_completed");
@@ -4593,9 +4593,9 @@ function mapOcrJob(row: Record<string, unknown>) {
     ? {
         ready: Number(preflightRow.ready || 0) === 1,
         score: Number(preflightRow.score || 0),
-        errors: jsonArray<any>(preflightRow.errors_json),
-        warnings: jsonArray<any>(preflightRow.warnings_json),
-        checks: jsonArray<any>(preflightRow.checks_json),
+        errors: jsonArray(preflightRow.errors_json),
+        warnings: jsonArray(preflightRow.warnings_json),
+        checks: jsonArray(preflightRow.checks_json),
       }
     : assessReconstructionQuality(structure, metadata);
   return {
@@ -4718,7 +4718,7 @@ function getOcrJobRow(id: string) {
 
 function normalizeOcrProfile(value: unknown): OcrProfile {
   const normalized = String(value || "exam");
-  return (["exam", "notes", "table", "mixed"] as const).includes(normalized as OcrProfile)
+  return (["auto", "exam", "notes", "table", "mixed"] as readonly string[]).includes(normalized)
     ? (normalized as OcrProfile)
     : "exam";
 }

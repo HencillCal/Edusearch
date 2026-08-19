@@ -29,6 +29,7 @@ export type PdfReconstructionOptions = {
   showReviewHighlights?: boolean;
   sourceImagePaths?: string[];
   visualMode?: PdfVisualMode;
+  draft?: boolean;
 };
 
 const A4_WIDTH = 595.28;

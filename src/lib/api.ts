@@ -189,7 +189,7 @@ export type OcrPipelineReport = {
   profile: "auto" | "exam" | "notes" | "table" | "mixed";
   qualityMode: "fast" | "balanced" | "accurate";
   language: string;
-  documentType:
+  documentType?:
     | "exam"
     | "notes"
     | "assignment"

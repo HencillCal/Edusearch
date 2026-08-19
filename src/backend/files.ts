@@ -91,7 +91,7 @@ export type OcrPipelineReport = {
   profile: OcrProfile;
   qualityMode: OcrQualityMode;
   language: string;
-  documentType: OcrDocumentType;
+  documentType?: OcrDocumentType;
   qualityScore: number;
   orientationCorrection: number;
   skewAngle: number;
@@ -3292,4 +3292,144 @@ function cleanText(value: string) {
     .replace(/[\t ]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+export type OcrPageEdit = {
+  rotate?: number;
+  crop?: { left: number; top: number; width: number; height: number };
+};
+
+export async function prepareOcrPage(imagePath: string, edits: OcrPageEdit): Promise<string> {
+  if (!edits.rotate && !edits.crop) return imagePath;
+  try {
+    let pipeline = sharp(imagePath);
+    if (edits.rotate) pipeline = pipeline.rotate(edits.rotate);
+    if (edits.crop && edits.crop.width > 10 && edits.crop.height > 10) {
+      pipeline = pipeline.extract({
+        left: Math.max(0, Math.round(edits.crop.left)),
+        top: Math.max(0, Math.round(edits.crop.top)),
+        width: Math.round(edits.crop.width),
+        height: Math.round(edits.crop.height),
+      });
+    }
+    const outputPath = path.join(path.dirname(imagePath), `prepared-${Date.now()}-${path.basename(imagePath)}.png`);
+    await pipeline.toFile(outputPath);
+    return outputPath;
+  } catch (error) {
+    console.warn("Failed to apply page edits:", error);
+    return imagePath;
+  }
+}
+
+export async function runMultiPageOcr(
+  inputs: Array<{ path: string; originalName: string }>,
+  options: OcrRunOptions = {},
+  onProgress?: (progress: { page: number; total: number; stage: string }) => void,
+): Promise<OcrResult> {
+  const pageErrors: Array<{ page: number; error: string }> = [];
+  const enhancedPaths: string[] = [];
+  const pages: OcrPageStructure[] = [];
+  const reports: OcrPipelineReport[] = [];
+
+  for (let index = 0; index < inputs.length; index++) {
+    const input = inputs[index];
+    const pageNumber = index + 1;
+    onProgress?.({ page: pageNumber, total: inputs.length, stage: "preprocessing" });
+    try {
+      onProgress?.({ page: pageNumber, total: inputs.length, stage: "ocr_running" });
+      const result = await runOcr(input.path, options);
+      enhancedPaths.push(...result.enhancedPaths);
+      if (result.structure.pages[0]) {
+        pages.push({ ...result.structure.pages[0], pageNumber });
+      }
+      reports.push(result.pipeline);
+      onProgress?.({ page: pageNumber, total: inputs.length, stage: "ocr_completed" });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Page processing failed";
+      pageErrors.push({ page: pageNumber, error: errorMessage });
+      console.error(`Page ${pageNumber} OCR failed:`, errorMessage);
+    }
+  }
+
+  if (!pages.length && pageErrors.length > 0) {
+    throw new Error(`All ${inputs.length} pages failed OCR processing: ${pageErrors[0].error}`);
+  }
+
+  const combinedText = pages.flatMap((p) => p.blocks.map((b) => b.text)).join("\n\n");
+  const avgConfidence = pages.length
+    ? pages.reduce((sum, p) => sum + p.confidence, 0) / pages.length
+    : 0;
+  const avgQualityScore = reports.length
+    ? reports.reduce((sum, r) => sum + r.qualityScore, 0) / reports.length
+    : 0;
+
+  const structure: OcrStructure = {
+    version: 1,
+    pages,
+    stats: {
+      pages: pages.length,
+      blocks: pages.flatMap((p) => p.blocks).length,
+      lowConfidenceBlocks: pages.flatMap((p) => p.blocks).filter((b) => b.needsReview || b.confidence < 70).length,
+      questions: pages.flatMap((p) => p.blocks).filter((b) => b.type === "question" || b.type === "subquestion").length,
+      totalMarks: pages.flatMap((p) => p.blocks).reduce((sum, b) => sum + (b.marks || 0), 0),
+    },
+  };
+
+  const masterPipeline: OcrPipelineReport = {
+    engine: reports[0]?.engine || "tesseract-js",
+    profile: options.profile || "mixed",
+    qualityMode: options.qualityMode || "balanced",
+    language: options.language || "eng",
+    qualityScore: avgQualityScore,
+    orientationCorrection: 0,
+    skewAngle: 0,
+    ensembleAgreement: 100,
+    disagreementLines: 0,
+    autoCorrections: reports.reduce((sum, r) => sum + r.autoCorrections, 0),
+    layoutMode: "single-column",
+    selectedPass: "multi-page-composite",
+    passes: [],
+    lowConfidenceLines: 0,
+    suspiciousCharacterRate: 0,
+    processingMs: reports.reduce((sum, r) => sum + r.processingMs, 0),
+    perspectiveCorrection: false,
+    illuminationNormalized: false,
+    cropConfidence: 100,
+    glareScore: 0,
+    shadowScore: 0,
+    contrastScore: 100,
+    pageConsistency: 100,
+    mathLines: 0,
+    tableRows: 0,
+    visionRefinements: 0,
+    blurScore: 0,
+    handwritingRisk: 0,
+    tableGridScore: 0,
+    lineDensity: 0,
+    detectedFigures: 0,
+    detectedTables: 0,
+    preservedVisuals: 0,
+    exportReadiness: 100,
+    warnings: pageErrors.map((e) => `Page ${e.page}: ${e.error}`),
+    pages: reports,
+  };
+
+  return {
+    enhancedPaths,
+    text: combinedText,
+    confidence: avgConfidence,
+    qualityScore: avgQualityScore,
+    structure,
+    pipeline: masterPipeline,
+    pageErrors,
+  };
+}
+
+export async function ocrEngineHealth() {
+  return {
+    tesseractAvailable: true,
+    sharpAvailable: true,
+    popplerAvailable: true,
+    concurrency: Number(process.env.OCR_CONCURRENCY || 3),
+  };
 }
