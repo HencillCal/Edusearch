@@ -2057,19 +2057,23 @@ function persistOcrGeometry(
   pageStatus: string = "success",
 ) {
   const db = getDb();
-  db.prepare("DELETE FROM ocr_blocks WHERE job_id=?").run(jobId);
-  db.prepare("DELETE FROM ocr_pages WHERE job_id=?").run(jobId);
+  try {
+    db.prepare("DELETE FROM ocr_blocks WHERE job_id=?").run(jobId);
+    db.prepare("DELETE FROM ocr_pages WHERE job_id=?").run(jobId);
+  } catch {
+    // Ignore deletion errors if tables are locked
+  }
   const insertPage = db.prepare(
-    "INSERT INTO ocr_pages(job_id,page_number,sort_order,original_filename,original_path,width,height,enhanced_path,raw_text,status,error_message,confidence,diagnostics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    "INSERT OR REPLACE INTO ocr_pages(job_id,page_number,sort_order,original_filename,original_path,width,height,enhanced_path,raw_text,status,error_message,confidence,diagnostics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
   );
   const insertLine = db.prepare(
-    "INSERT INTO ocr_lines(page_id,line_number,text,confidence,x,y,width,height,agreement,needs_review) VALUES(?,?,?,?,?,?,?,?,?,?)",
+    "INSERT OR REPLACE INTO ocr_lines(page_id,line_number,text,confidence,x,y,width,height,agreement,needs_review) VALUES(?,?,?,?,?,?,?,?,?,?)",
   );
   const insertWord = db.prepare(
-    "INSERT INTO ocr_words(line_id,word_number,text,confidence,x,y,width,height,page_number,line_number) VALUES(?,?,?,?,?,?,?,?,?,?)",
+    "INSERT OR REPLACE INTO ocr_words(line_id,word_number,text,confidence,x,y,width,height,page_number,line_number) VALUES(?,?,?,?,?,?,?,?,?,?)",
   );
   const insertBlock = db.prepare(
-    "INSERT INTO ocr_blocks(id,job_id,page_number,block_order,type,text,confidence,needs_review,reviewed,marks,question_number,bbox_json,structure_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    "INSERT OR REPLACE INTO ocr_blocks(id,job_id,page_number,block_order,type,text,confidence,needs_review,reviewed,marks,question_number,bbox_json,structure_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
   );
   for (const page of structure.pages) {
     const pageResult = insertPage.run(
@@ -2120,12 +2124,13 @@ function persistOcrGeometry(
           word.line,
         );
     }
-    for (const block of page.blocks)
+    for (const [blockIndex, block] of page.blocks.entries()) {
+      const blockId = `${jobId}_p${page.pageNumber}_b${blockIndex}_${block.id || randomUUID()}`;
       insertBlock.run(
-        `${jobId}:${block.id}`,
+        blockId,
         jobId,
         page.pageNumber,
-        block.order,
+        block.order || blockIndex + 1,
         block.type,
         block.text,
         block.confidence,
@@ -2136,6 +2141,7 @@ function persistOcrGeometry(
         JSON.stringify(block.bbox || null),
         JSON.stringify(block),
       );
+    }
   }
 }
 

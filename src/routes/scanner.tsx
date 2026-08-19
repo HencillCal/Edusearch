@@ -656,12 +656,38 @@ function ScannerPage() {
             )}
             {stage === "processing" && (
               <div className="grid min-h-[520px] place-items-center text-center">
-                <div>
-                  <Loader2 className="mx-auto size-9 animate-spin text-brand" />
-                  <p className="mt-4 font-medium">{formatOcrStage(job?.stage)}</p>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    The backend is processing the source image. No placeholder text is shown while
-                    OCR runs.
+                <div className="w-full max-w-md space-y-5 rounded-2xl border border-border bg-surface p-7 shadow-soft">
+                  <div className="relative mx-auto flex size-14 items-center justify-center rounded-full bg-brand/10 text-brand">
+                    <Loader2 className="size-7 animate-spin" />
+                  </div>
+                  <div>
+                    <p className="font-display text-lg font-semibold text-foreground">
+                      {job?.currentStage || formatOcrStage(job?.stage) || "Extracting text and structure..."}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {job?.totalPages && job.totalPages > 1
+                        ? `Processing page ${job.pagesCompleted || 1} of ${job.totalPages}`
+                        : "Enhancing contrast, deskewing, and recognizing text"}
+                    </p>
+                  </div>
+                  <div className="space-y-1.5 text-left">
+                    <div className="flex justify-between text-xs font-semibold text-muted-foreground">
+                      <span>OCR Progress</span>
+                      <span className="text-brand">
+                        {Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%
+                      </span>
+                    </div>
+                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-brand transition-all duration-500 ease-out"
+                        style={{
+                          width: `${Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Your document is being processed. The editor will load automatically once complete.
                   </p>
                 </div>
               </div>
