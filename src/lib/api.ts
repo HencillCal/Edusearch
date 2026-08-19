@@ -251,8 +251,9 @@ export type OcrJob = {
   originalFilename: string;
   sourceUrl: string;
   sourcePaths: string[];
-  sourceFilenames: string[];
-  pageCount: number;
+  sourceFilenames?: string[];
+  pageCount?: number;
+  totalPages?: number;
   progress: number;
   pagesCompleted: number;
   currentStage: string;
