@@ -21,6 +21,7 @@ import {
   jsonObject,
   rebuildDocumentChunkIndex,
   refreshDocumentFts,
+  syncDocumentTopics,
 } from "./db";
 import {
   assessReconstructionQuality,
@@ -1359,18 +1360,24 @@ async function analyzeStoredFile(file: StoredInput, user: SessionUser) {
       pages: Number(cached.pages),
       fileType: cached.file_type,
     };
-    suggestions = normalizeMetadata(
-      JSON.parse(cached.suggestions_json),
-      inferMetadata(file.originalName, extracted.text, extracted.fileType, extracted.pages),
-    );
+    suggestions = {
+      ...normalizeMetadata(
+        JSON.parse(cached.suggestions_json),
+        inferMetadata(file.originalName, extracted.text, extracted.fileType, extracted.pages),
+      ),
+      fileType: extracted.fileType,
+    };
   } else {
     extracted = await extractDocument(file);
-    suggestions = await suggestMetadata(
-      file.originalName,
-      extracted.text,
-      extracted.fileType,
-      extracted.pages,
-    );
+    suggestions = {
+      ...(await suggestMetadata(
+        file.originalName,
+        extracted.text,
+        extracted.fileType,
+        extracted.pages,
+      )),
+      fileType: extracted.fileType,
+    };
     try {
       db.prepare(
         "INSERT OR REPLACE INTO document_processing_cache(sha256, extracted_text, pages, file_type, suggestions_json) VALUES(?,?,?,?,?)",
