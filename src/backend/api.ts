@@ -413,8 +413,13 @@ function subjects(request: Request) {
   const rows = db
     .prepare(
       `
-    SELECT s.id,s.name,s.description,COUNT(d.id) AS count
-    FROM subjects s LEFT JOIN documents d ON lower(d.subject)=lower(s.name) AND d.status='published' AND ${access.sql}
+    SELECT s.id, s.name, s.description,
+           COUNT(DISTINCT d.id) AS count
+    FROM subjects s
+    LEFT JOIN topics t ON t.subject_id = s.id
+    LEFT JOIN document_topics dt ON dt.topic_id = t.id
+    LEFT JOIN documents d ON (d.id = dt.document_id OR lower(d.subject) = lower(s.name))
+         AND d.status = 'published' AND ${access.sql}
     GROUP BY s.id ORDER BY s.name
   `,
     )
@@ -424,20 +429,37 @@ function subjects(request: Request) {
     description: string;
     count: number;
   }>;
+
   const topicStatement = db.prepare(
-    "SELECT name,synonyms_json FROM topics WHERE subject_id=? ORDER BY name",
+    `
+    SELECT t.id, t.name, t.synonyms_json,
+           COUNT(DISTINCT d.id) AS count
+    FROM topics t
+    LEFT JOIN document_topics dt ON dt.topic_id = t.id
+    LEFT JOIN documents d ON (d.id = dt.document_id OR lower(d.topics_json) LIKE '%' || lower(t.name) || '%')
+         AND d.status = 'published' AND ${access.sql}
+    WHERE t.subject_id = ?
+    GROUP BY t.id ORDER BY t.name
+  `,
   );
+
   return json({
     subjects: rows.map((row) => ({
       name: row.name,
       description: row.description,
       count: Number(row.count),
-      topics: (topicStatement.all(row.id) as Array<{ name: string; synonyms_json: string }>).map(
-        (topic) => ({
-          name: topic.name,
-          synonyms: jsonArray(topic.synonyms_json),
-        }),
-      ),
+      topics: (
+        topicStatement.all(...access.params, row.id) as Array<{
+          id: number;
+          name: string;
+          synonyms_json: string;
+          count: number;
+        }>
+      ).map((topic) => ({
+        name: topic.name,
+        count: Number(topic.count),
+        synonyms: jsonArray(topic.synonyms_json),
+      })),
     })),
   });
 }
@@ -768,10 +790,12 @@ function runLexicalSearch(
     const likeParams = [...params];
     if (query) {
       likeWhere.push(
-        "(lower(d.title) LIKE ? OR lower(d.subject) LIKE ? OR lower(d.description) LIKE ? OR lower(d.extracted_text) LIKE ?)",
+        `(lower(d.title) LIKE ? OR lower(d.subject) LIKE ? OR lower(d.topics_json) LIKE ? OR lower(d.description) LIKE ? OR lower(d.extracted_text) LIKE ? OR EXISTS (
+          SELECT 1 FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE dt.document_id=d.id AND lower(t.name) LIKE ?
+        ))`,
       );
       const like = `%${query.toLowerCase()}%`;
-      likeParams.push(like, like, like, like);
+      likeParams.push(like, like, like, like, like, like);
     }
     const order =
       sort === "downloads"
@@ -1312,13 +1336,56 @@ async function analyzeUploads(request: Request) {
 async function analyzeStoredFile(file: StoredInput, user: SessionUser) {
   const db = getDb();
   const virusScan = await scanForViruses(file.path);
-  const extracted = await extractDocument(file);
-  const suggestions = await suggestMetadata(
-    file.originalName,
-    extracted.text,
-    extracted.fileType,
-    extracted.pages,
-  );
+
+  const cached = db
+    .prepare(
+      "SELECT extracted_text, pages, file_type, suggestions_json FROM document_processing_cache WHERE sha256=?",
+    )
+    .get(file.sha256) as
+    | {
+        extracted_text: string;
+        pages: number;
+        file_type: string;
+        suggestions_json: string;
+      }
+    | undefined;
+
+  let extracted: { text: string; pages: number; fileType: string };
+  let suggestions: ReturnType<typeof inferMetadata>;
+
+  if (cached) {
+    extracted = {
+      text: cached.extracted_text,
+      pages: Number(cached.pages),
+      fileType: cached.file_type,
+    };
+    suggestions = normalizeMetadata(
+      JSON.parse(cached.suggestions_json),
+      inferMetadata(file.originalName, extracted.text, extracted.fileType, extracted.pages),
+    );
+  } else {
+    extracted = await extractDocument(file);
+    suggestions = await suggestMetadata(
+      file.originalName,
+      extracted.text,
+      extracted.fileType,
+      extracted.pages,
+    );
+    try {
+      db.prepare(
+        "INSERT OR REPLACE INTO document_processing_cache(sha256, extracted_text, pages, file_type, suggestions_json) VALUES(?,?,?,?,?)",
+      ).run(
+        file.sha256,
+        extracted.text,
+        extracted.pages,
+        extracted.fileType,
+        JSON.stringify(suggestions),
+      );
+    } catch {
+      // ignore cache errors
+    }
+  }
+
   const exact = db
     .prepare("SELECT id,title FROM documents WHERE sha256=? LIMIT 1")
     .get(file.sha256) as { id: string; title: string } | undefined;
@@ -1393,9 +1460,11 @@ async function submitUpload(request: Request) {
     throw new HttpError(400, "Choose the legal basis for sharing this document.");
   }
   const status =
-    user.role === "admin" && requestedStatus === "awaiting_review" && body.publishNow === true
-      ? "published"
-      : requestedStatus;
+    requestedStatus === "draft"
+      ? "draft"
+      : user.role === "admin" || body.publishNow === true
+        ? "published"
+        : requestedStatus;
   const libraryId =
     typeof body.libraryId === "string" && body.libraryId.trim() ? body.libraryId.trim() : null;
   const library = libraryId ? requireLibraryManager(libraryId, user) : null;
@@ -1445,6 +1514,7 @@ async function submitUpload(request: Request) {
       sourceAttribution,
       "clear",
     );
+  syncDocumentTopics(id, metadata.subject, metadata.topics);
   if (libraryId) {
     getDb()
       .prepare(
@@ -1460,17 +1530,9 @@ async function submitUpload(request: Request) {
       subject: metadata.subject,
       topics_json: JSON.stringify(metadata.topics),
       uploaded_by: user.id,
-      visibility,
-      library_id: libraryId,
     });
   }
-  audit(user.id, "document.submit", "document", id, {
-    status,
-    visibility,
-    libraryId,
-    rightsBasis,
-    sourceAttribution: Boolean(sourceAttribution),
-  });
+  audit(user.id, "upload.submit", "document", id, { status, libraryId, visibility });
   return json(
     {
       document: mapDocument(getDb().prepare("SELECT * FROM documents WHERE id=?").get(id), user),
@@ -4827,15 +4889,31 @@ function inferMetadata(filename: string, text: string, fileType: string, pages: 
 }
 
 function inferDocType(value: string) {
-  if (/marking scheme|memo|answers|solution/.test(value)) return "Marking scheme";
-  if (/examination|exam paper|past paper|end of semester|end of term/.test(value)) return "Exam";
-  if (/assignment|coursework/.test(value)) return "Assignment";
+  if (
+    /\bmarking scheme\b|\bmarking guide\b|\bscoring rubric\b|\bmodel answers\b|\baward marks\b/.test(
+      value,
+    )
+  )
+    return "Marking scheme";
+  if (/prompting guide|prompt engineering|\bguide\b|handbook|reference manual|tutorial/.test(value))
+    return "Notes";
+  if (
+    /lecture notes|lecture note|\bnotes\b|revision notes|course pack|chapter \d|unit \d/.test(value)
+  )
+    return "Notes";
+  if (
+    /examination|exam paper|past paper|end of semester|end of term|\bexam\b|\btest paper\b/.test(
+      value,
+    )
+  )
+    return "Exam";
+  if (/assignment|coursework|homework|problem set/.test(value)) return "Assignment";
   if (/practical|laboratory|lab manual/.test(value)) return "Practical paper";
-  if (/lecture slide|presentation|powerpoint/.test(value)) return "Lecture slides";
+  if (/lecture slide|presentation|powerpoint|\bslides\b/.test(value)) return "Lecture slides";
   if (/course outline|syllabus/.test(value)) return "Course outline";
-  if (/research|thesis|dissertation/.test(value)) return "Research document";
-  if (/note|revision/.test(value)) return "Notes";
-  return "Past paper";
+  if (/research|thesis|dissertation|journal article|conference paper/.test(value))
+    return "Research document";
+  return "Notes";
 }
 
 function inferSubject(value: string) {

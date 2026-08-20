@@ -20,7 +20,7 @@ type SubjectResponse = {
     name: string;
     description: string;
     count: number;
-    topics: Array<{ name: string; synonyms: string[] }>;
+    topics: Array<{ name: string; count?: number; synonyms: string[] }>;
   }>;
 };
 
@@ -36,7 +36,7 @@ function SubjectsPage() {
         name: subject.name,
         description: "",
         count: subject.count,
-        topics: subject.topics.map((name) => ({ name, synonyms: [] })),
+        topics: subject.topics.map((name) => ({ name, count: 0, synonyms: [] })),
       })),
     },
   });
@@ -78,20 +78,19 @@ function SubjectsPage() {
     <div className="min-h-screen">
       <SiteHeader />
       <main className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
-        <h1 className="text-3xl">Browse by subject</h1>
+        <h1 className="text-3xl font-display font-bold">Browse by subject</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-          Subjects and topics organise the library internally. Direct search remains the primary way
-          to find documents.
+          Subjects and topics organize the library. Select any subject or topic to view available documents.
         </p>
         <div className="mt-8 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {query.data.subjects.map((subject) => (
             <div
               key={subject.name}
-              className="card-lift rounded-xl border border-border bg-card p-5 shadow-soft"
+              className="card-lift rounded-2xl border border-border bg-card p-5 shadow-soft"
             >
               <div className="flex items-baseline justify-between">
                 <h2 className="font-display text-xl font-semibold">{subject.name}</h2>
-                <span className="text-xs text-muted-foreground">
+                <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">
                   {subject.count.toLocaleString()} docs
                 </span>
               </div>
@@ -101,14 +100,19 @@ function SubjectsPage() {
                   return (
                     <div
                       key={topic.name}
-                      className="inline-flex items-center rounded-full border border-border bg-background pr-1"
+                      className="inline-flex items-center rounded-full border border-border bg-background pr-1 hover:border-brand transition"
                     >
                       <Link to="/search" search={{ q: topic.name }}>
                         <Badge
                           variant="outline"
-                          className="cursor-pointer border-0 hover:text-brand"
+                          className="cursor-pointer border-0 hover:text-brand flex items-center gap-1"
                         >
-                          {topic.name}
+                          <span>{topic.name}</span>
+                          {Boolean(topic.count && topic.count > 0) && (
+                            <span className="text-[10px] font-bold text-brand bg-brand/10 px-1.5 py-0.2 rounded-full">
+                              {topic.count}
+                            </span>
+                          )}
                         </Badge>
                       </Link>
                       <Button

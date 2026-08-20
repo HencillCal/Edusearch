@@ -58,6 +58,23 @@ export function initializeDatabase() {
       related_json TEXT NOT NULL DEFAULT '[]'
     );
 
+    CREATE TABLE IF NOT EXISTS document_topics (
+      document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      PRIMARY KEY(document_id, topic_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_document_topics_topic ON document_topics(topic_id);
+    CREATE INDEX IF NOT EXISTS idx_document_topics_doc ON document_topics(document_id);
+
+    CREATE TABLE IF NOT EXISTS document_processing_cache (
+      sha256 TEXT PRIMARY KEY,
+      extracted_text TEXT NOT NULL,
+      pages INTEGER NOT NULL DEFAULT 1,
+      file_type TEXT NOT NULL,
+      suggestions_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -566,7 +583,81 @@ export function refreshDocumentFts(documentId: string) {
       jsonArray(row.keywords_json).join(" "),
       String(row.extracted_text || ""),
     );
+  syncDocumentTopics(String(row.id), String(row.subject), jsonArray(row.topics_json));
   refreshDocumentChunks(documentId, row);
+}
+
+export function resolveTaxonomy(
+  subjectOrTopic: string,
+  rawTopics: string[] = [],
+): { subject: string; topicIds: number[]; topicNames: string[] } {
+  const database = getDb();
+  const allTopicRows = database
+    .prepare(
+      "SELECT t.id, t.name, t.synonyms_json, t.subject_id, s.name as subject_name FROM topics t LEFT JOIN subjects s ON s.id=t.subject_id",
+    )
+    .all() as Array<{
+    id: number;
+    name: string;
+    synonyms_json: string;
+    subject_id: number | null;
+    subject_name: string | null;
+  }>;
+  const subjectRows = database.prepare("SELECT id, name FROM subjects").all() as Array<{
+    id: number;
+    name: string;
+  }>;
+
+  const candidates = [subjectOrTopic, ...rawTopics].filter(Boolean);
+  let resolvedSubject = "";
+  const topicIds = new Set<number>();
+  const topicNames = new Set<string>();
+
+  const directSubject = subjectRows.find(
+    (s) => s.name.toLowerCase() === subjectOrTopic.trim().toLowerCase(),
+  );
+  if (directSubject) {
+    resolvedSubject = directSubject.name;
+  }
+
+  for (const item of candidates) {
+    const trimmed = item.trim().toLowerCase();
+    if (!trimmed) continue;
+    for (const t of allTopicRows) {
+      const matchName = t.name.toLowerCase() === trimmed;
+      const synonyms = jsonArray(t.synonyms_json).map((s) => s.toLowerCase());
+      const matchSyn = synonyms.includes(trimmed);
+      if (matchName || matchSyn) {
+        topicIds.add(t.id);
+        topicNames.add(t.name);
+        if (!resolvedSubject && t.subject_name) {
+          resolvedSubject = t.subject_name;
+        }
+      }
+    }
+  }
+
+  if (!resolvedSubject) {
+    resolvedSubject = subjectOrTopic || "Computing";
+  }
+
+  return {
+    subject: resolvedSubject,
+    topicIds: Array.from(topicIds),
+    topicNames: Array.from(topicNames),
+  };
+}
+
+export function syncDocumentTopics(documentId: string, subject: string, topics: string[]) {
+  const database = getDb();
+  const taxonomy = resolveTaxonomy(subject, topics);
+  const insert = database.prepare(
+    "INSERT OR IGNORE INTO document_topics(document_id, topic_id) VALUES(?, ?)",
+  );
+  for (const topicId of taxonomy.topicIds) {
+    insert.run(documentId, topicId);
+  }
+  return taxonomy;
 }
 
 export function refreshDocumentChunks(documentId: string, suppliedRow?: Record<string, unknown>) {
@@ -854,6 +945,13 @@ function seedBaseData() {
         .all() as Array<{ id: string }>;
       missingChunks.forEach((row) => refreshDocumentChunks(row.id));
     }
+  }
+
+  const allDocs = database
+    .prepare("SELECT id, subject, topics_json FROM documents")
+    .all() as Array<{ id: string; subject: string; topics_json: string }>;
+  for (const doc of allDocs) {
+    syncDocumentTopics(doc.id, doc.subject, jsonArray(doc.topics_json));
   }
 
   const adminEmail = process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase();
