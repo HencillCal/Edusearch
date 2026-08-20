@@ -683,6 +683,10 @@ function AdminPage() {
     });
   };
 
+  const [activeTab, setActiveTab] = useState<
+    "dashboard" | "review_queue" | "ocr_review" | "documents" | "taxonomy" | "users" | "compliance"
+  >("dashboard");
+
   if (!auth.isLoading && auth.data?.user?.role !== "admin") {
     return (
       <div className="min-h-screen">
@@ -704,6 +708,9 @@ function AdminPage() {
   }
 
   const metrics = dashboard.data?.metrics;
+  const pendingCount = pending.data?.documents.length ?? 0;
+  const ocrPendingCount = ocrReview.data?.jobs.length ?? 0;
+
   return (
     <div className="min-h-screen">
       <SiteHeader />
@@ -712,9 +719,9 @@ function AdminPage() {
           <div className="flex items-center gap-3">
             <ShieldCheck className="size-7 text-brand" />
             <div>
-              <h1 className="text-3xl">Admin dashboard</h1>
+              <h1 className="text-3xl font-display font-bold">Admin Console</h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                Moderation, OCR, search demand and document-library operations.
+                Document moderation, review queue, taxonomy, and platform administration.
               </p>
             </div>
           </div>
@@ -723,6 +730,184 @@ function AdminPage() {
             {reindexing ? "Reindexing…" : "Rebuild search index"}
           </Button>
         </div>
+
+        {/* Admin Navigation Tabs */}
+        <div className="mt-8 flex flex-wrap gap-2 border-b border-border pb-3">
+          <button
+            type="button"
+            onClick={() => setActiveTab("dashboard")}
+            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "dashboard"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            Dashboard
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("review_queue")}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "review_queue"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            <span>Review Queue</span>
+            {pendingCount > 0 && (
+              <span className="grid min-w-4 place-items-center rounded-full bg-destructive px-1.5 text-[10px] font-bold text-destructive-foreground">
+                {pendingCount}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("ocr_review")}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "ocr_review"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            <span>OCR Review</span>
+            {ocrPendingCount > 0 && (
+              <span className="grid min-w-4 place-items-center rounded-full bg-muted px-1.5 text-[10px] font-bold">
+                {ocrPendingCount}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("documents")}
+            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "documents"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            All Documents ({allDocuments.data?.documents.length ?? 0})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("taxonomy")}
+            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "taxonomy"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            Taxonomy
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("users")}
+            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "users"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            Users ({users.data?.users.length ?? 0})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("compliance")}
+            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "compliance"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            Reports & Copyright
+          </button>
+        </div>
+
+        {/* REVIEW QUEUE TAB */}
+        {activeTab === "review_queue" && (
+          <section className="mt-6 rounded-xl border border-border bg-card p-6 shadow-soft">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-semibold">Moderation Review Queue</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Documents submitted by contributors awaiting editorial approval before publication.
+                </p>
+              </div>
+              <Badge variant={pendingCount > 0 ? "default" : "secondary"}>
+                {pendingCount} {pendingCount === 1 ? "document" : "documents"} awaiting review
+              </Badge>
+            </div>
+
+            <div className="mt-6 space-y-4">
+              {pending.data?.documents.length ? (
+                pending.data.documents.map((document) => (
+                  <article
+                    key={document.id}
+                    className="flex flex-col justify-between gap-4 rounded-xl border border-border bg-surface p-5 transition hover:border-brand/40 sm:flex-row sm:items-center"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-display text-base font-semibold">
+                          {document.title}
+                        </span>
+                        <Badge variant="outline">{document.docType}</Badge>
+                        <Badge variant="secondary">{document.subject}</Badge>
+                      </div>
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        {document.fileType} · {document.pages} pages
+                        {document.uploadedBy ? ` · Uploaded by ${document.uploadedBy}` : ""}
+                        {document.createdAt ? ` · Submitted ${new Date(document.createdAt).toLocaleString()}` : ""}
+                      </p>
+                      {document.description && (
+                        <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                          {document.description}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button asChild size="sm" variant="outline">
+                        <Link to="/document/$id" params={{ id: document.id }}>
+                          <Eye className="mr-1.5 size-3.5" /> Preview
+                        </Link>
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => moderate(document.id, "approve")}
+                        className="bg-brand text-brand-foreground"
+                      >
+                        <CheckCircle2 className="mr-1.5 size-3.5" /> Approve & Publish
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => moderate(document.id, "request_changes")}
+                      >
+                        <AlertTriangle className="mr-1.5 size-3.5" /> Request changes
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => moderate(document.id, "reject")}
+                      >
+                        <XCircle className="mr-1.5 size-3.5" /> Reject
+                      </Button>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <div className="rounded-xl border border-dashed border-border p-12 text-center text-sm text-muted-foreground">
+                  <CheckCircle2 className="mx-auto size-8 text-brand" />
+                  <p className="mt-3 font-display text-base font-semibold text-foreground">
+                    All caught up!
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    No documents currently require editorial review.
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
         <section className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <Metric

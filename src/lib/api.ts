@@ -25,6 +25,7 @@ export type ApiDocument = DocDoc & {
   sourceAttribution?: string;
   rightsStatus?: "clear" | "claimed" | "restricted" | "removed";
   rightsRestrictionNote?: string;
+  uploadedBy?: string;
 };
 
 export type ApiLibrary = {

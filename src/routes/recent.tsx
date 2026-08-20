@@ -36,12 +36,12 @@ function RecentPage() {
   return (
     <div className="min-h-screen">
       <SiteHeader />
-      <main className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
-        <h1 className="text-3xl">Recently added</h1>
+      <main className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
+        <h1 className="text-3xl font-display font-bold">Recently added</h1>
         <p className="mt-2 text-sm text-muted-foreground">
           Freshly reviewed and published documents.
         </p>
-        <div className="mt-8 space-y-4">
+        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {query.data.results.map((document) => (
             <DocumentCard key={document.id} doc={document} />
           ))}

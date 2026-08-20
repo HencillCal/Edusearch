@@ -279,6 +279,20 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   const adminDocMatch = pathname.match(/^\/api\/admin\/documents\/([^/]+)$/);
   if (adminDocMatch && method === "PATCH") return moderateDocument(request, adminDocMatch[1]);
   if (adminDocMatch && method === "DELETE") return deleteAdminDocument(request, adminDocMatch[1]);
+  const adminDocApproveMatch = pathname.match(/^\/api\/admin\/documents\/([^/]+)\/approve$/);
+  if (adminDocApproveMatch && method === "POST")
+    return adminApproveDocument(request, adminDocApproveMatch[1]);
+  const adminDocRejectMatch = pathname.match(/^\/api\/admin\/documents\/([^/]+)\/reject$/);
+  if (adminDocRejectMatch && method === "POST")
+    return adminRejectDocument(request, adminDocRejectMatch[1]);
+  const adminDocRequestChangesMatch = pathname.match(
+    /^\/api\/admin\/documents\/([^/]+)\/request-changes$/,
+  );
+  if (adminDocRequestChangesMatch && method === "POST")
+    return adminRequestChangesDocument(request, adminDocRequestChangesMatch[1]);
+  const adminDocPublishMatch = pathname.match(/^\/api\/admin\/documents\/([^/]+)\/publish$/);
+  if (adminDocPublishMatch && method === "POST")
+    return adminPublishDocument(request, adminDocPublishMatch[1]);
 
   throw new HttpError(404, "API endpoint not found.");
 }
@@ -4508,6 +4522,104 @@ async function moderateDocument(request: Request, id: string) {
   if (status === "published" && before) notifyTopicFollowers(id, before);
   audit(admin.id, `document.${action}`, "document", id, { reason, status });
   return json({
+    document: mapDocument(db.prepare("SELECT * FROM documents WHERE id=?").get(id), admin, true),
+  });
+}
+
+async function adminApproveDocument(request: Request, id: string) {
+  const admin = requireAdmin(request);
+  const db = getDb();
+  const before = db
+    .prepare(
+      "SELECT title,subject,topics_json,uploaded_by,visibility,library_id FROM documents WHERE id=?",
+    )
+    .get(id) as Record<string, unknown> | undefined;
+  if (!before) throw new HttpError(404, "Document not found.");
+  db.prepare(
+    "UPDATE documents SET status='published', rejection_reason=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+  ).run(id);
+  refreshDocumentFts(id);
+  if (before.uploaded_by) {
+    createNotification(
+      String(before.uploaded_by),
+      "document_approved",
+      "Document approved",
+      `Your document "${before.title}" was approved and is now published.`,
+      `/document/${id}`,
+    );
+  }
+  notifyTopicFollowers(id, before);
+  audit(admin.id, "document.approve", "document", id, { status: "published" });
+  return json({
+    ok: true,
+    document: mapDocument(db.prepare("SELECT * FROM documents WHERE id=?").get(id), admin, true),
+  });
+}
+
+async function adminPublishDocument(request: Request, id: string) {
+  return adminApproveDocument(request, id);
+}
+
+async function adminRejectDocument(request: Request, id: string) {
+  const admin = requireAdmin(request);
+  const body = await readJson(request);
+  const reason =
+    typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 500)
+      : "Does not meet guidelines";
+  const db = getDb();
+  const before = db
+    .prepare("SELECT title,uploaded_by FROM documents WHERE id=?")
+    .get(id) as Record<string, unknown> | undefined;
+  if (!before) throw new HttpError(404, "Document not found.");
+  db.prepare(
+    "UPDATE documents SET status='rejected', rejection_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+  ).run(reason, id);
+  refreshDocumentFts(id);
+  if (before.uploaded_by) {
+    createNotification(
+      String(before.uploaded_by),
+      "document_rejected",
+      "Document rejected",
+      `Your document "${before.title}" was rejected: ${reason}`,
+      "/saved",
+    );
+  }
+  audit(admin.id, "document.reject", "document", id, { reason, status: "rejected" });
+  return json({
+    ok: true,
+    document: mapDocument(db.prepare("SELECT * FROM documents WHERE id=?").get(id), admin, true),
+  });
+}
+
+async function adminRequestChangesDocument(request: Request, id: string) {
+  const admin = requireAdmin(request);
+  const body = await readJson(request);
+  const reason = requiredString(body.reason, "Reason for requesting changes");
+  const db = getDb();
+  const before = db
+    .prepare("SELECT title,uploaded_by FROM documents WHERE id=?")
+    .get(id) as Record<string, unknown> | undefined;
+  if (!before) throw new HttpError(404, "Document not found.");
+  db.prepare(
+    "UPDATE documents SET status='changes_requested', rejection_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+  ).run(reason, id);
+  refreshDocumentFts(id);
+  if (before.uploaded_by) {
+    createNotification(
+      String(before.uploaded_by),
+      "document_changes_requested",
+      "Changes requested",
+      `Changes were requested on "${before.title}": ${reason}`,
+      "/saved",
+    );
+  }
+  audit(admin.id, "document.request_changes", "document", id, {
+    reason,
+    status: "changes_requested",
+  });
+  return json({
+    ok: true,
     document: mapDocument(db.prepare("SELECT * FROM documents WHERE id=?").get(id), admin, true),
   });
 }

@@ -24,7 +24,7 @@ const navLinks = [
   { to: "/libraries", label: "Libraries" },
   { to: "/upload", label: "Upload" },
   { to: "/scanner", label: "OCR scanner" },
-  { to: "/saved", label: "Saved" },
+  { to: "/saved", label: "My Library" },
 ] as const;
 
 export function SiteHeader({ compactSearch = true }: { compactSearch?: boolean }) {
@@ -34,6 +34,15 @@ export function SiteHeader({ compactSearch = true }: { compactSearch?: boolean }
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const user = auth.data?.user;
+  const adminStats = useQuery({
+    queryKey: ["admin-pending-count"],
+    queryFn: () =>
+      apiFetch<{ documents: unknown[] }>("/api/admin/documents?status=awaiting_review"),
+    enabled: typeof window !== "undefined" && user?.role === "admin",
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const pendingCount = adminStats.data?.documents?.length ?? 0;
   const notifications = useQuery({
     queryKey: ["notifications"],
     queryFn: () =>
@@ -118,9 +127,14 @@ export function SiteHeader({ compactSearch = true }: { compactSearch?: boolean }
           {user?.role === "admin" && (
             <Link
               to="/admin"
-              className="rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             >
-              Admin
+              <span>Admin</span>
+              {pendingCount > 0 && (
+                <span className="grid min-w-4 place-items-center rounded-full bg-destructive px-1 text-[10px] font-bold leading-4 text-destructive-foreground">
+                  {pendingCount}
+                </span>
+              )}
             </Link>
           )}
         </nav>

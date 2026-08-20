@@ -4,8 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Download,
   FileClock,
@@ -13,16 +13,15 @@ import {
   FileUp,
   History,
   Loader2,
-  Plus,
   RotateCcw,
   Save,
   ScanLine,
   Sparkles,
-  Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SiteHeader } from "@/components/site-header";
-import { SiteFooter } from "@/components/site-footer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ConfirmModal, type ConfirmModalState } from "@/components/ui/prompt-dialog";
@@ -43,7 +42,7 @@ export const Route = createFileRoute("/scanner")({
   validateSearch: (search: Record<string, unknown>): ScannerSearch => ({
     job: typeof search.job === "string" ? search.job : undefined,
   }),
-  head: () => ({ meta: [{ title: "AI OCR reconstruction editor — EduSearch AI" }] }),
+  head: () => ({ meta: [{ title: "AI OCR Reconstruction & Document Editor — EduSearch AI" }] }),
   component: ScannerPage,
 });
 
@@ -55,19 +54,15 @@ const steps = [
   "Confidence review",
   "PDF and DOCX generation",
 ];
-const blockTypes: Array<{ value: OcrBlockType; label: string }> = [
-  { value: "institution", label: "Institution" },
-  { value: "title", label: "Document title" },
-  { value: "metadata", label: "Metadata" },
-  { value: "instruction", label: "Instructions" },
-  { value: "section", label: "Section heading" },
-  { value: "question", label: "Question" },
-  { value: "subquestion", label: "Sub-question" },
-  { value: "table", label: "Table / columns" },
-  { value: "figure", label: "Figure / diagram" },
-  { value: "formula", label: "Formula" },
-  { value: "paragraph", label: "Paragraph" },
-  { value: "footer", label: "Footer" },
+
+const semanticTags: Array<{ value: OcrBlockType; label: string; format: (text: string) => string }> = [
+  { value: "title", label: "Title", format: (t) => `# ${t.toUpperCase()}` },
+  { value: "section", label: "Section", format: (t) => `## ${t}` },
+  { value: "question", label: "Question", format: (t) => `Question: ${t}` },
+  { value: "subquestion", label: "Sub-question", format: (t) => `  a) ${t}` },
+  { value: "instruction", label: "Instruction", format: (t) => `*Note: ${t}*` },
+  { value: "formula", label: "Formula", format: (t) => `$$ ${t} $$` },
+  { value: "paragraph", label: "Paragraph", format: (t) => t },
 ];
 
 function ScannerPage() {
@@ -82,7 +77,6 @@ function ScannerPage() {
   const [structure, setStructure] = useState<OcrStructure | null>(null);
   const [metadata, setMetadata] = useState<Record<string, unknown>>({});
   const [selectedPage, setSelectedPage] = useState(1);
-  const [mode, setMode] = useState<"structured" | "raw">("raw");
   const [rawText, setRawText] = useState("");
   const [saving, setSaving] = useState(false);
   const [revisionNote, setRevisionNote] = useState("");
@@ -94,7 +88,11 @@ function ScannerPage() {
   const [ocrLanguage, setOcrLanguage] = useState("eng");
   const [reprocessing, setReprocessing] = useState(false);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [currentIssueIndex, setCurrentIssueIndex] = useState(0);
+  const [isReviewingIssues, setIsReviewingIssues] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const selectedJob = useQuery({
     queryKey: ["ocr-job", requestedJobId],
@@ -122,34 +120,10 @@ function ScannerPage() {
     enabled: typeof window !== "undefined" && Boolean(job?.id),
     retry: false,
   });
-  const preflight = useQuery({
-    queryKey: ["ocr-preflight", job?.id, job?.revision],
-    queryFn: () =>
-      apiFetch<{ preflight: OcrPreflight }>(
-        `/api/ocr/jobs/${encodeURIComponent(job?.id || "")}/preflight`,
-      ),
-    enabled:
-      typeof window !== "undefined" &&
-      Boolean(job?.id) &&
-      job?.status !== "processing" &&
-      job?.status !== "failed",
-    retry: false,
-  });
 
   useEffect(() => {
     if (selectedJob.data?.job) applyJob(selectedJob.data.job);
   }, [selectedJob.data]);
-
-  useEffect(() => {
-    if (selectedJob.isError) {
-      setStage("idle");
-      toast.error(
-        selectedJob.error instanceof Error
-          ? selectedJob.error.message
-          : "Could not open the OCR job",
-      );
-    }
-  }, [selectedJob.isError, selectedJob.error]);
 
   const applyJob = (nextJob: OcrJob) => {
     setJob(nextJob);
@@ -177,34 +151,18 @@ function ScannerPage() {
   const chooseFiles = async (selected: FileList | File[]) => {
     const files = Array.from(selected).filter(Boolean);
     if (!files.length) return;
-    if (files.length > 20) {
-      toast.error("You can upload up to 20 pages or documents at once.");
-      return;
-    }
     setStage("processing");
-    setJob(null);
-    setStructure(null);
     try {
       const form = new FormData();
-      for (const file of files) {
-        form.append("images", file);
-      }
+      for (const file of files) form.append("images", file);
       form.append("profile", profile);
       form.append("qualityMode", qualityMode);
       form.append("language", ocrLanguage);
       form.append("combineAsDocument", "true");
-      const result = await apiFetch<{ job: OcrJob; jobs?: OcrJob[] }>("/api/ocr/jobs", {
-        method: "POST",
-        body: form,
-      });
+      const result = await apiFetch<{ job: OcrJob }>("/api/ocr/jobs", { method: "POST", body: form });
       applyJob(result.job);
       await navigate({ to: "/scanner", search: { job: result.job.id }, replace: true });
       await queryClient.invalidateQueries({ queryKey: ["ocr-jobs"] });
-      toast.success(
-        files.length > 1
-          ? `Uploaded ${files.length} pages. Processing OCR in background...`
-          : "Upload received. Processing OCR in background...",
-      );
     } catch (error) {
       setStage("idle");
       toast.error(error instanceof Error ? error.message : "OCR failed");
@@ -213,16 +171,19 @@ function ScannerPage() {
 
   const currentPage =
     structure?.pages.find((page) => page.pageNumber === selectedPage) || structure?.pages[0];
+
   const liveStats = useMemo(() => {
     const blocks = structure?.pages.flatMap((page) => page.blocks) || [];
+    const lowConf = blocks.filter(
+      (block) =>
+        (block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) &&
+        !block.reviewed,
+    );
     return {
       pages: structure?.pages.length || 0,
       blocks: blocks.length,
-      lowConfidenceBlocks: blocks.filter(
-        (block) =>
-          (block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) &&
-          !block.reviewed,
-      ).length,
+      lowConfidenceBlocks: lowConf.length,
+      lowConfItems: lowConf,
       questions: blocks.filter((block) => block.type === "question" || block.type === "subquestion")
         .length,
       totalMarks: blocks.reduce((sum, block) => sum + (block.marks || 0), 0),
@@ -233,129 +194,110 @@ function ScannerPage() {
     auth.data?.user && (!job?.contributorUserId || job.contributorUserId === auth.data.user.id),
   );
 
-  const updateBlock = (blockId: string, patch: Partial<OcrBlock>) => {
-    setStructure(
-      (current) =>
-        current && {
-          ...current,
-          pages: current.pages.map((page) => ({
-            ...page,
-            blocks: page.blocks.map((block) =>
-              block.id === blockId ? { ...block, ...patch } : block,
-            ),
-          })),
-        },
+  const aiOrganiseDocument = () => {
+    if (!rawText.trim()) return;
+    const lines = rawText.split("\n");
+    const processed: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      if (!line) {
+        processed.push("");
+        continue;
+      }
+      if (/^(?:question\s+\d+|q\d+[\.:]|\d+[\.\)]\s+)/i.test(line)) {
+        line = line.replace(/^(question\s+\d+)/i, "\n$1").trim();
+      }
+      line = line.replace(/\[\s*(\d+)\s*marks?\s*\]/gi, " [$1 Marks]");
+      line = line.replace(/\(\s*(\d+)\s*marks?\s*\)/gi, " ($1 Marks)");
+      if (
+        processed.length > 0 &&
+        processed[processed.length - 1] &&
+        !/[.:?!\]\)]$/.test(processed[processed.length - 1]) &&
+        !/^(?:question|\d+[\.\)]|[a-z][\.\)]|[ivx]+[\.\)])/i.test(line) &&
+        line.length > 0 &&
+        !/^[A-Z\s]{4,}$/.test(line)
+      ) {
+        processed[processed.length - 1] += " " + line;
+      } else {
+        processed.push(line);
+      }
+    }
+    const cleaned = processed.join("\n").replace(/\n{3,}/g, "\n\n");
+    setRawText(cleaned);
+    toast.success("AI Organised document layout, questions, and marks");
+  };
+
+  const applySemanticTag = (tag: (typeof semanticTags)[number]) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const selected = rawText.substring(start, end);
+    if (!selected) {
+      toast.info("Highlight text in the editor first to tag it");
+      return;
+    }
+    const formatted = tag.format(selected);
+    const updated = rawText.substring(0, start) + formatted + rawText.substring(end);
+    setRawText(updated);
+    toast.success(`Tagged as ${tag.label}`);
+  };
+
+  const reviewNextIssue = () => {
+    if (liveStats.lowConfidenceBlocks === 0) return;
+    setCurrentIssueIndex((prev) => (prev + 1) % liveStats.lowConfidenceBlocks);
+  };
+
+  const reviewPrevIssue = () => {
+    if (liveStats.lowConfidenceBlocks === 0) return;
+    setCurrentIssueIndex((prev) =>
+      prev === 0 ? liveStats.lowConfidenceBlocks - 1 : prev - 1,
     );
   };
 
-  const moveBlock = (blockId: string, direction: -1 | 1) => {
-    setStructure((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        pages: current.pages.map((page) => {
-          const index = page.blocks.findIndex((block) => block.id === blockId);
-          const target = index + direction;
-          if (index < 0 || target < 0 || target >= page.blocks.length) return page;
-          const blocks = [...page.blocks];
-          [blocks[index], blocks[target]] = [blocks[target], blocks[index]];
-          return { ...page, blocks: blocks.map((block, order) => ({ ...block, order })) };
-        }),
-      };
-    });
-  };
-
-  const deleteBlock = (blockId: string) => {
-    setStructure(
-      (current) =>
-        current && {
-          ...current,
-          pages: current.pages.map((page) => ({
-            ...page,
-            blocks: page.blocks
-              .filter((block) => block.id !== blockId)
-              .map((block, order) => ({ ...block, order })),
-          })),
-        },
-    );
-  };
-
-  const splitBlock = (blockId: string) => {
-    setStructure((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        pages: current.pages.map((page) => {
-          const index = page.blocks.findIndex((block) => block.id === blockId);
-          if (index < 0) return page;
-          const block = page.blocks[index];
-          const midpoint = Math.floor(block.text.length / 2);
-          const splitAt =
-            block.text.lastIndexOf("\n", midpoint) > 0
-              ? block.text.lastIndexOf("\n", midpoint)
-              : block.text.lastIndexOf(" ", midpoint);
-          if (splitAt < 1 || splitAt >= block.text.length - 1) return page;
-          const first = block.text.slice(0, splitAt).trim();
-          const second = block.text.slice(splitAt).trim();
-          const nextBlock: OcrBlock = {
-            ...block,
-            id: `${block.id}-split-${Date.now()}`,
-            text: second,
-            order: block.order + 1,
-            reviewed: false,
-          };
-          const blocks = [...page.blocks];
-          blocks[index] = { ...block, text: first, reviewed: false };
-          blocks.splice(index + 1, 0, nextBlock);
-          return { ...page, blocks: blocks.map((item, order) => ({ ...item, order })) };
-        }),
-      };
-    });
-  };
-
-  const mergeBlockWithNext = (blockId: string) => {
-    setStructure((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        pages: current.pages.map((page) => {
-          const index = page.blocks.findIndex((block) => block.id === blockId);
-          if (index < 0 || index >= page.blocks.length - 1) return page;
-          const currentBlock = page.blocks[index];
-          const next = page.blocks[index + 1];
-          if (next.type !== currentBlock.type && currentBlock.type !== "paragraph") return page;
-          const blocks = page.blocks.filter((_, itemIndex) => itemIndex !== index + 1);
-          blocks[index] = {
-            ...currentBlock,
-            text: `${currentBlock.text.trim()} ${next.text.trim()}`.replace(/\s+/g, " "),
-            marks: currentBlock.marks ?? next.marks,
-            reviewed: false,
-          };
-          return { ...page, blocks: blocks.map((item, order) => ({ ...item, order })) };
-        }),
-      };
-    });
-  };
-
-  const addBlock = () => {
-    if (!structure || !currentPage) return;
-    const block: OcrBlock = {
-      id: `p${currentPage.pageNumber}-manual-${Date.now()}`,
-      page: currentPage.pageNumber,
-      order: currentPage.blocks.length,
-      type: "paragraph",
-      text: "New text block",
-      confidence: 100,
-      needsReview: false,
-      reviewed: true,
-    };
+  const markCurrentIssueVerified = () => {
+    if (!structure || !liveStats.lowConfItems.length) return;
+    const target = liveStats.lowConfItems[currentIssueIndex];
+    if (!target) return;
     setStructure({
       ...structure,
-      pages: structure.pages.map((page) =>
-        page.pageNumber === currentPage.pageNumber
-          ? { ...page, blocks: [...page.blocks, block] }
-          : page,
-      ),
+      pages: structure.pages.map((page) => ({
+        ...page,
+        blocks: page.blocks.map((block) =>
+          block.id === target.id ? { ...block, reviewed: true, needsReview: false } : block,
+        ),
+      })),
+    });
+    toast.success("Marked verified");
+    if (currentIssueIndex >= liveStats.lowConfidenceBlocks - 1) {
+      setCurrentIssueIndex(0);
+    }
+  };
+
+  const markAllRemainingReviewed = () => {
+    setConfirmModal({
+      open: true,
+      title: "Mark all remaining areas verified?",
+      description: `All ${liveStats.lowConfidenceBlocks} highlighted areas will be accepted as verified.`,
+      confirmLabel: "Mark all verified",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        if (!structure) return;
+        setStructure({
+          ...structure,
+          pages: structure.pages.map((page) => ({
+            ...page,
+            blocks: page.blocks.map((block) => ({
+              ...block,
+              reviewed: true,
+              needsReview: false,
+            })),
+          })),
+        });
+        setIsReviewingIssues(false);
+        toast.success("All OCR areas marked verified");
+      },
+      onCancel: () => setConfirmModal(null),
     });
   };
 
@@ -366,8 +308,8 @@ function ScannerPage() {
       const result = await apiFetch<{ job: OcrJob }>(`/api/ocr/jobs/${job.id}`, {
         method: "PATCH",
         body: JSON.stringify({
-          correctedText: mode === "raw" ? rawText : undefined,
-          structure: mode === "structured" ? structure : undefined,
+          correctedText: rawText,
+          structure,
           metadata,
           note: revisionNote || "Saved reconstruction corrections",
           ...(canDeclareRights && rightsDeclared
@@ -377,9 +319,6 @@ function ScannerPage() {
       });
       applyJob(result.job);
       setRevisionNote("");
-      await queryClient.invalidateQueries({ queryKey: ["ocr-revisions", job.id] });
-      await queryClient.invalidateQueries({ queryKey: ["ocr-jobs"] });
-      await queryClient.invalidateQueries({ queryKey: ["ocr-preflight", job.id] });
       toast.success(`Revision ${result.job.revision} saved`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save corrections");
@@ -393,7 +332,7 @@ function ScannerPage() {
     setConfirmModal({
       open: true,
       title: `Restore Revision ${revision}?`,
-      description: "A new revision will preserve the current history.",
+      description: "A new revision will preserve current edit history.",
       confirmLabel: "Restore Revision",
       onConfirm: async () => {
         setConfirmModal(null);
@@ -403,9 +342,7 @@ function ScannerPage() {
             { method: "POST" },
           );
           applyJob(result.job);
-          await queryClient.invalidateQueries({ queryKey: ["ocr-revisions", job.id] });
-          await queryClient.invalidateQueries({ queryKey: ["ocr-preflight", job.id] });
-          toast.success(`Revision ${revision} restored as revision ${result.job.revision}`);
+          toast.success(`Revision ${revision} restored`);
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "Could not restore revision");
         }
@@ -420,17 +357,9 @@ function ScannerPage() {
     try {
       const result = await apiFetch<{ job: OcrJob }>(`/api/ocr/jobs/${job.id}/reprocess`, {
         method: "POST",
-        body: JSON.stringify({
-          profile,
-          qualityMode,
-          language: ocrLanguage,
-          forceImageOcr: sourceIsPdf,
-        }),
+        body: JSON.stringify({ profile, qualityMode, language: ocrLanguage }),
       });
       applyJob(result.job);
-      await queryClient.invalidateQueries({ queryKey: ["ocr-revisions", job.id] });
-      await queryClient.invalidateQueries({ queryKey: ["ocr-jobs"] });
-      await queryClient.invalidateQueries({ queryKey: ["ocr-preflight", job.id] });
       toast.success(`Reprocessed · ${Math.round(result.job.qualityScore)}/100 OCR quality score`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not reprocess OCR");
@@ -439,17 +368,20 @@ function ScannerPage() {
     }
   };
 
-  const publish = async () => {
+  const handlePublishClick = () => {
     if (!job) return;
     if (liveStats.lowConfidenceBlocks > 0) {
-      toast.error(
-        `Review ${liveStats.lowConfidenceBlocks} unresolved low-confidence block${liveStats.lowConfidenceBlocks === 1 ? "" : "s"} first`,
-      );
+      setPublishModalOpen(true);
       return;
     }
+    executePublish();
+  };
+
+  const executePublish = async () => {
+    if (!job) return;
     try {
       if (canDeclareRights && (!rightsDeclared || rightsBasis === "unspecified")) {
-        toast.error("Choose a legal sharing basis and confirm the declaration before publishing");
+        toast.error("Choose a legal sharing basis and confirm declaration before publishing");
         return;
       }
       const result = await apiFetch<{ documentId: string; status: string }>(
@@ -467,15 +399,16 @@ function ScannerPage() {
             : {}),
         },
       );
+      setPublishModalOpen(false);
       toast.success(
         result.status === "published"
-          ? "OCR document published"
-          : "OCR document sent for moderation",
+          ? "Document published to EduSearch AI!"
+          : "Document submitted to admin review queue!",
       );
       const refreshed = await apiFetch<{ job: OcrJob }>(`/api/ocr/jobs/${job.id}`);
       applyJob(refreshed.job);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not publish OCR document");
+      toast.error(error instanceof Error ? error.message : "Could not publish document");
     }
   };
 
@@ -484,318 +417,346 @@ function ScannerPage() {
   const enhancedPageUrl = job?.enhancedPaths[selectedPage - 1];
 
   return (
-    <div className="min-h-screen">
+    <div className="flex h-screen flex-col overflow-hidden bg-background">
       <SiteHeader />
-      <main className="mx-auto max-w-[1500px] px-4 py-8 sm:px-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-3xl">Exam reconstruction editor</h1>
-            <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-              Enhance a photographed academic paper, detect its structure, review uncertain text
-              block-by-block, and export an exam-ready or well-organised PDF and DOCX.
-            </p>
-          </div>
-          {job && (
-            <div className="flex flex-wrap gap-2 text-xs">
-              <Badge variant="secondary">Revision {job.revision}</Badge>
-              <Badge
-                variant={
-                  job.qualityScore >= 85
-                    ? "secondary"
-                    : job.qualityScore >= 70
-                      ? "outline"
-                      : "destructive"
-                }
-              >
-                {Math.round(job.qualityScore)}/100 OCR quality
-              </Badge>
-              <Badge variant={liveStats.lowConfidenceBlocks ? "destructive" : "secondary"}>
-                {liveStats.lowConfidenceBlocks} unresolved
-              </Badge>
-              <Badge variant="outline">{liveStats.questions} questions</Badge>
-              <Badge variant="outline">{liveStats.totalMarks} detected marks</Badge>
-            </div>
-          )}
-        </div>
 
-        <div className="mt-7 grid gap-6 items-start xl:grid-cols-[300px_minmax(0,1fr)]">
-          <aside className="space-y-5 xl:sticky xl:top-6 xl:max-h-[calc(100vh-4rem)] xl:overflow-y-auto xl:pr-1">
-            <div className="rounded-xl border border-border bg-card p-5 shadow-soft">
-              <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                <label className="text-xs font-medium text-muted-foreground">
-                  Document profile
-                  <select
-                    value={profile}
-                    onChange={(event) => setProfile(event.target.value as OcrJob["profile"])}
-                    className="mt-1 h-9 w-full rounded border border-border bg-background px-2 text-sm text-foreground outline-none focus:border-brand"
-                  >
-                    <option value="exam">Printed exam</option>
-                    <option value="notes">Printed / lecture notes</option>
-                    <option value="table">Tables and forms</option>
-                    <option value="mixed">Mixed layout</option>
-                  </select>
-                </label>
-                <label className="text-xs font-medium text-muted-foreground">
-                  Accuracy mode
-                  <select
-                    value={qualityMode}
-                    onChange={(event) =>
-                      setQualityMode(event.target.value as OcrJob["qualityMode"])
-                    }
-                    className="mt-1 h-9 w-full rounded border border-border bg-background px-2 text-sm text-foreground outline-none focus:border-brand"
-                  >
-                    <option value="balanced">Balanced (Fast & clean)</option>
-                    <option value="fast">Fast (Single-pass)</option>
-                    <option value="accurate">Accurate · multi-pass</option>
-                  </select>
-                </label>
-                <label className="text-xs font-medium text-muted-foreground sm:col-span-2 xl:col-span-1">
-                  OCR languages
-                  <input
-                    value={ocrLanguage}
-                    onChange={(event) => setOcrLanguage(event.target.value)}
-                    placeholder="eng or eng+swa"
-                    className="mt-1 h-9 w-full rounded border border-border bg-background px-2 text-sm text-foreground outline-none focus:border-brand"
-                  />
-                  <span className="mt-1 block text-[11px] font-normal">
-                    Use Tesseract language codes. Example: eng+swa.
-                  </span>
-                </label>
-              </div>
-              <label className="grid cursor-pointer place-items-center rounded-xl border-2 border-dashed border-border bg-surface p-7 text-center transition hover:border-brand">
-                <ScanLine className="size-8 text-brand" />
-                <p className="mt-3 font-display text-base font-semibold">Upload exam or notes</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Select 1 or multiple images/PDFs · up to 20 pages
-                </p>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept=".jpg,.jpeg,.png,.webp,.heic,.pdf"
-                  className="hidden"
-                  onChange={(event) => event.target.files?.length && chooseFiles(event.target.files)}
-                />
-                <Button
-                  className="mt-4"
-                  type="button"
-                  disabled={stage === "processing"}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    fileInputRef.current?.click();
-                  }}
+      <main className="flex flex-1 min-h-0 overflow-hidden">
+        <aside className="hidden lg:flex w-[300px] shrink-0 flex-col border-r border-border bg-card overflow-y-auto overscroll-contain p-4">
+          <div className="space-y-4">
+            <div>
+              <p className="font-display text-base font-bold">OCR Workspace</p>
+              <p className="text-xs text-muted-foreground">
+                Enhance scans and edit academic papers.
+              </p>
+            </div>
+
+            <div className="space-y-3 rounded-xl border border-border bg-surface p-3 text-xs">
+              <label className="block font-medium text-muted-foreground">
+                Document format
+                <select
+                  value={profile}
+                  onChange={(e) => setProfile(e.target.value as OcrJob["profile"])}
+                  className="mt-1 h-8 w-full rounded border border-border bg-background px-2 text-xs text-foreground outline-none focus:border-brand"
                 >
-                  {stage === "processing" ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <FileUp className="size-4" />
-                  )}
-                  {stage === "processing" ? "Processing OCR…" : "Choose files"}
-                </Button>
+                  <option value="exam">Printed exam</option>
+                  <option value="notes">Lecture notes</option>
+                  <option value="table">Tables and marks</option>
+                  <option value="mixed">Mixed academic layout</option>
+                </select>
               </label>
-              <div className="mt-5 space-y-2">
-                {steps.map((step) => (
-                  <div key={step} className="flex items-center gap-2 text-xs">
-                    {stage === "done" ? (
-                      <CheckCircle2 className="size-3.5 text-brand" />
-                    ) : stage === "processing" ? (
-                      <Loader2 className="size-3.5 animate-spin text-brand" />
-                    ) : (
-                      <span className="size-3.5 rounded-full border border-border" />
-                    )}
-                    <span
-                      className={stage === "idle" ? "text-muted-foreground" : "text-foreground"}
-                    >
-                      {step}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <label className="block font-medium text-muted-foreground">
+                Accuracy mode
+                <select
+                  value={qualityMode}
+                  onChange={(e) => setQualityMode(e.target.value as OcrJob["qualityMode"])}
+                  className="mt-1 h-8 w-full rounded border border-border bg-background px-2 text-xs text-foreground outline-none focus:border-brand"
+                >
+                  <option value="balanced">Balanced (Fast & clean)</option>
+                  <option value="fast">Fast (Single-pass)</option>
+                  <option value="accurate">Accurate · Multi-pass</option>
+                </select>
+              </label>
+            </div>
+
+            <label className="grid cursor-pointer place-items-center rounded-xl border-2 border-dashed border-border bg-surface p-5 text-center transition hover:border-brand">
+              <ScanLine className="size-6 text-brand" />
+              <p className="mt-2 font-display text-sm font-semibold">Upload exam or notes</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Images or PDFs up to 20 pages
+              </p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".jpg,.jpeg,.png,.webp,.heic,.pdf"
+                className="hidden"
+                onChange={(e) => e.target.files?.length && chooseFiles(e.target.files)}
+              />
+              <Button
+                className="mt-3 h-8 text-xs"
+                type="button"
+                disabled={stage === "processing"}
+                onClick={(e) => {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }}
+              >
+                {stage === "processing" ? (
+                  <Loader2 className="mr-1 size-3.5 animate-spin" />
+                ) : (
+                  <FileUp className="mr-1 size-3.5" />
+                )}
+                {stage === "processing" ? "Processing…" : "Choose files"}
+              </Button>
+            </label>
+
+            <div className="space-y-1.5 rounded-xl border border-border bg-surface p-3 text-xs">
+              <p className="mb-2 font-semibold text-muted-foreground">Pipeline Status</p>
+              {steps.map((step) => (
+                <div key={step} className="flex items-center gap-2 text-[11px]">
+                  {stage === "done" ? (
+                    <CheckCircle2 className="size-3 text-brand" />
+                  ) : stage === "processing" ? (
+                    <Loader2 className="size-3 animate-spin text-brand" />
+                  ) : (
+                    <span className="size-3 rounded-full border border-border" />
+                  )}
+                  <span className={stage === "idle" ? "text-muted-foreground" : "text-foreground"}>
+                    {step}
+                  </span>
+                </div>
+              ))}
             </div>
 
             {auth.data?.user && (
-              <div className="rounded-xl border border-border bg-card p-5 shadow-soft">
-                <div className="mb-3 flex items-center gap-2 font-display font-semibold">
-                  <FileClock className="size-4 text-brand" /> Recent OCR jobs
-                </div>
-                <div className="space-y-2">
-                  {recentJobs.isLoading && <Loader2 className="size-4 animate-spin text-brand" />}
-                  {recentJobs.data?.jobs.slice(0, 8).map((item) => (
+              <div className="rounded-xl border border-border bg-surface p-3">
+                <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold">
+                  <FileClock className="size-3.5 text-brand" /> Recent scans
+                </p>
+                <div className="space-y-1.5">
+                  {recentJobs.isLoading && <Loader2 className="size-3.5 animate-spin text-brand" />}
+                  {recentJobs.data?.jobs.slice(0, 5).map((item) => (
                     <button
                       key={item.id}
                       type="button"
                       onClick={() => navigate({ to: "/scanner", search: { job: item.id } })}
-                      className={`w-full rounded-lg border p-3 text-left transition hover:border-brand ${job?.id === item.id ? "border-brand bg-brand/5" : "border-border bg-surface"}`}
+                      className={`w-full rounded-lg border p-2 text-left text-xs transition hover:border-brand ${
+                        job?.id === item.id ? "border-brand bg-brand/5" : "border-border bg-background"
+                      }`}
                     >
-                      <p className="truncate text-sm font-medium">{item.originalFilename}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
+                      <p className="truncate font-medium">{item.originalFilename}</p>
+                      <p className="text-[10px] text-muted-foreground">
                         Revision {item.revision} · {item.status.replaceAll("_", " ")}
                       </p>
                     </button>
                   ))}
-                  {!recentJobs.isLoading && recentJobs.data?.jobs.length === 0 && (
-                    <p className="text-xs text-muted-foreground">No saved OCR jobs yet.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <section className="flex flex-1 flex-col min-h-0 overflow-y-auto overscroll-contain p-4 lg:p-6">
+          {!job && stage === "idle" && (
+            <div className="grid flex-1 place-items-center text-center">
+              <div>
+                <Sparkles className="mx-auto size-12 text-brand" />
+                <p className="mt-4 font-display text-xl font-bold">Upload a paper to begin OCR</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  The original scan will appear alongside an AI-assisted unified document editor.
+                </p>
+                <Button
+                  className="mt-6"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Upload className="mr-1.5 size-4" /> Upload paper or notes
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {stage === "processing" && (
+            <div className="grid flex-1 place-items-center text-center">
+              <div className="w-full max-w-md space-y-5 rounded-2xl border border-border bg-card p-7 shadow-soft">
+                <div className="relative mx-auto flex size-14 items-center justify-center rounded-full bg-brand/10 text-brand">
+                  <Loader2 className="size-7 animate-spin" />
+                </div>
+                <div>
+                  <p className="font-display text-lg font-semibold text-foreground">
+                    {job?.currentStage || formatOcrStage(job?.stage) || "Extracting text and structure..."}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {job?.totalPages && job.totalPages > 1
+                      ? `Processing page ${job.pagesCompleted || 1} of ${job.totalPages}`
+                      : "Enhancing contrast, deskewing, and recognizing text"}
+                  </p>
+                </div>
+                <div className="space-y-1.5 text-left">
+                  <div className="flex justify-between text-xs font-semibold text-muted-foreground">
+                    <span>OCR Progress</span>
+                    <span className="text-brand">
+                      {Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-brand transition-all duration-500 ease-out"
+                      style={{
+                        width: `${Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {stage === "failed" && job && (
+            <div className="grid flex-1 place-items-center text-center">
+              <div className="max-w-xl rounded-xl border border-destructive/40 bg-destructive/5 p-6">
+                <AlertTriangle className="mx-auto size-9 text-destructive" />
+                <p className="mt-4 font-display text-lg font-semibold">OCR failed</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {job.errorMessage || "The source text could not be extracted."}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {job && structure && stage === "done" && (
+            <div className="space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+                <div>
+                  <h2 className="font-display text-xl font-bold">
+                    {String(metadata.title || job.originalFilename)}
+                  </h2>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                    <Badge variant="secondary">Revision {job.revision}</Badge>
+                    <Badge
+                      variant={
+                        job.qualityScore >= 85
+                          ? "secondary"
+                          : job.qualityScore >= 70
+                            ? "outline"
+                            : "destructive"
+                      }
+                    >
+                      {Math.round(job.qualityScore)}/100 Quality
+                    </Badge>
+                    <Badge variant={liveStats.lowConfidenceBlocks ? "outline" : "secondary"}>
+                      {liveStats.lowConfidenceBlocks} review items
+                    </Badge>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={aiOrganiseDocument}
+                    className="bg-brand/5 border-brand/40 text-brand hover:bg-brand/10 font-semibold"
+                  >
+                    <Sparkles className="mr-1.5 size-3.5" /> AI Organise Document
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={saving || job.status === "published"}
+                    onClick={saveCorrections}
+                  >
+                    {saving ? (
+                      <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                    ) : (
+                      <Save className="mr-1.5 size-3.5" />
+                    )}
+                    Save Edits
+                  </Button>
+                  {auth.data?.user ? (
+                    <Button
+                      size="sm"
+                      disabled={job.status === "published"}
+                      onClick={handlePublishClick}
+                      className="bg-brand text-brand-foreground font-semibold"
+                    >
+                      {job.status === "published" ? "Published" : "Publish Document"}
+                    </Button>
+                  ) : (
+                    <Button asChild size="sm">
+                      <Link to="/login">Log in to publish</Link>
+                    </Button>
                   )}
                 </div>
               </div>
-            )}
-          </aside>
 
-          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-soft sm:p-6">
-            {!job && stage === "idle" && (
-              <div className="grid min-h-[520px] place-items-center text-center">
-                <div>
-                  <Sparkles className="mx-auto size-10 text-brand" />
-                  <p className="mt-4 font-display text-xl font-semibold">Upload a paper to begin</p>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    The original page will appear beside an editable structured reconstruction.
-                  </p>
-                </div>
-              </div>
-            )}
-            {stage === "processing" && (
-              <div className="grid min-h-[520px] place-items-center text-center">
-                <div className="w-full max-w-md space-y-5 rounded-2xl border border-border bg-surface p-7 shadow-soft">
-                  <div className="relative mx-auto flex size-14 items-center justify-center rounded-full bg-brand/10 text-brand">
-                    <Loader2 className="size-7 animate-spin" />
-                  </div>
-                  <div>
-                    <p className="font-display text-lg font-semibold text-foreground">
-                      {job?.currentStage || formatOcrStage(job?.stage) || "Extracting text and structure..."}
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {job?.totalPages && job.totalPages > 1
-                        ? `Processing page ${job.pagesCompleted || 1} of ${job.totalPages}`
-                        : "Enhancing contrast, deskewing, and recognizing text"}
-                    </p>
-                  </div>
-                  <div className="space-y-1.5 text-left">
-                    <div className="flex justify-between text-xs font-semibold text-muted-foreground">
-                      <span>OCR Progress</span>
-                      <span className="text-brand">
-                        {Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%
+              {liveStats.lowConfidenceBlocks > 0 && (
+                <div className="rounded-xl border border-amber-300/80 bg-amber-50/80 p-3.5 text-xs text-amber-950 dark:bg-amber-950/20 dark:text-amber-100 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-semibold">
+                      <AlertTriangle className="size-4 text-amber-600 dark:text-amber-400" />
+                      <span>
+                        {liveStats.lowConfidenceBlocks} OCR areas need confidence review
                       </span>
                     </div>
-                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="h-full rounded-full bg-brand transition-all duration-500 ease-out"
-                        style={{
-                          width: `${Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%`,
-                        }}
-                      />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setIsReviewingIssues(!isReviewingIssues)}
+                        className="h-7 text-xs bg-background"
+                      >
+                        {isReviewingIssues ? "Close Reviewer" : "Open Step Reviewer"}
+                      </Button>
                     </div>
                   </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Your document is being processed. The editor will load automatically once complete.
-                  </p>
+
+                  {isReviewingIssues && liveStats.lowConfItems.length > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-amber-200/80 pt-2.5 dark:border-amber-800">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold">
+                          Issue {currentIssueIndex + 1} of {liveStats.lowConfidenceBlocks}:
+                        </span>
+                        <span className="rounded bg-background px-2 py-1 font-mono text-[11px] border border-border">
+                          {liveStats.lowConfItems[currentIssueIndex]?.text.slice(0, 60)}…
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          size="icon"
+                          variant="outline"
+                          onClick={reviewPrevIssue}
+                          className="size-7 bg-background"
+                        >
+                          <ChevronLeft className="size-4" />
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={markCurrentIssueVerified}
+                          className="h-7 text-xs bg-background text-brand"
+                        >
+                          <CheckCircle2 className="mr-1 size-3" /> Accept & Verify
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="outline"
+                          onClick={reviewNextIssue}
+                          className="size-7 bg-background"
+                        >
+                          <ChevronRight className="size-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
+              )}
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 rounded-xl border border-border bg-card p-4">
+                <MetadataField
+                  label="Title"
+                  value={String(metadata.title || "")}
+                  onChange={(v) => setMetadata({ ...metadata, title: v })}
+                />
+                <MetadataField
+                  label="Subject"
+                  value={String(metadata.subject || "")}
+                  onChange={(v) => setMetadata({ ...metadata, subject: v })}
+                />
+                <MetadataField
+                  label="Document type"
+                  value={String(metadata.docType || "")}
+                  onChange={(v) => setMetadata({ ...metadata, docType: v })}
+                />
+                <MetadataField
+                  label="Year"
+                  value={String(metadata.year || "")}
+                  onChange={(v) =>
+                    setMetadata({ ...metadata, year: Number(v) || new Date().getFullYear() })
+                  }
+                />
               </div>
-            )}
-            {stage === "failed" && job && (
-              <div className="grid min-h-[520px] place-items-center text-center">
-                <div className="max-w-xl rounded-xl border border-destructive/40 bg-destructive/5 p-6">
-                  <AlertTriangle className="mx-auto size-9 text-destructive" />
-                  <p className="mt-4 font-display text-lg font-semibold">OCR failed</p>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    {job.errorMessage || "The source text could not be extracted."}
-                  </p>
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Stage: {formatOcrStage(job.stage)}. The original upload remains available for
-                    another attempt.
-                  </p>
-                </div>
-              </div>
-            )}
 
-            {job && structure && stage === "done" && (
-              <>
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
-                  <div>
-                    <p className="font-display text-lg font-semibold">
-                      {String(metadata.title || job.originalFilename)}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {Math.round(job.confidence)}% OCR confidence · {Math.round(job.qualityScore)}
-                      /100 quality score · {structure.pages.length} page
-                      {structure.pages.length === 1 ? "" : "s"}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      variant={mode === "raw" ? "default" : "outline"}
-                      onClick={() => setMode("raw")}
-                    >
-                      <FileText className="mr-1.5 size-3.5" />
-                      Unified Text Editor
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={mode === "structured" ? "default" : "outline"}
-                      onClick={() => setMode("structured")}
-                    >
-                      Advanced Block Editor
-                    </Button>
-                  </div>
-                </div>
-
-                {job.pipeline.warnings.length > 0 && (
-                  <div className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-xs text-amber-950 dark:bg-amber-950/20 dark:text-amber-100">
-                    <p className="font-semibold">Scan-quality warnings</p>
-                    <ul className="mt-1 list-disc space-y-1 pl-4">
-                      {job.pipeline.warnings.map((warning) => (
-                        <li key={warning}>{warning}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <MetadataField
-                    label="Title"
-                    value={String(metadata.title || "")}
-                    onChange={(value) => setMetadata({ ...metadata, title: value })}
-                  />
-                  <MetadataField
-                    label="Subject"
-                    value={String(metadata.subject || "")}
-                    onChange={(value) => setMetadata({ ...metadata, subject: value })}
-                  />
-                  <MetadataField
-                    label="Document type"
-                    value={String(metadata.docType || "")}
-                    onChange={(value) => setMetadata({ ...metadata, docType: value })}
-                  />
-                  <MetadataField
-                    label="Year"
-                    value={String(metadata.year || "")}
-                    onChange={(value) =>
-                      setMetadata({ ...metadata, year: Number(value) || new Date().getFullYear() })
-                    }
-                  />
-                  <MetadataField
-                    label="Institution"
-                    value={String(metadata.institution || "")}
-                    onChange={(value) => setMetadata({ ...metadata, institution: value })}
-                  />
-                  <MetadataField
-                    label="Author / lecturer"
-                    value={String(metadata.author || "")}
-                    onChange={(value) => setMetadata({ ...metadata, author: value })}
-                  />
-                  <MetadataField
-                    label="Level"
-                    value={String(metadata.level || "")}
-                    onChange={(value) => setMetadata({ ...metadata, level: value })}
-                  />
-                  <MetadataField
-                    label="Language"
-                    value={String(metadata.language || "")}
-                    onChange={(value) => setMetadata({ ...metadata, language: value })}
-                  />
-                </div>
-
-                <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
+              {structure.pages.length > 1 && (
+                <div className="flex gap-2 overflow-x-auto pb-1">
                   {structure.pages.map((page) => (
                     <Button
                       key={page.pageNumber}
@@ -804,393 +765,123 @@ function ScannerPage() {
                       onClick={() => setSelectedPage(page.pageNumber)}
                     >
                       Page {page.pageNumber}
-                      {page.blocks.some(
-                        (block) =>
-                          (block.needsReview ||
-                            block.confidence < 70 ||
-                            (block.agreement ?? 1) < 0.58) &&
-                          !block.reviewed,
-                      ) && <AlertTriangle className="size-3.5" />}
                     </Button>
                   ))}
                 </div>
+              )}
 
-                <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                  <div className="min-w-0 rounded-lg border border-border bg-surface p-3">
-                    <div className="mb-3 flex items-center justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        Enhanced original · page {selectedPage}
-                      </p>
-                      <Badge variant="outline">{Math.round(currentPage?.confidence || 0)}%</Badge>
-                    </div>
-                    {enhancedPageUrl ? (
-                      <img
-                        src={enhancedPageUrl}
-                        alt={`Enhanced OCR page ${selectedPage}`}
-                        className="max-h-[720px] w-full rounded border border-border bg-white object-contain"
-                      />
-                    ) : sourceIsPdf ? (
-                      <iframe
-                        title="Original PDF"
-                        src={`${job.sourceUrl}#page=${selectedPage}`}
-                        className="h-[720px] w-full rounded border border-border bg-white"
-                      />
-                    ) : (
-                      <img
-                        src={job.sourceUrl}
-                        alt="Original academic document"
-                        className="max-h-[720px] w-full rounded border border-border bg-white object-contain"
-                      />
-                    )}
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="rounded-xl border border-border bg-card p-3 shadow-soft">
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Source page {selectedPage}
+                    </p>
                   </div>
-
-                  {mode === "raw" ? (
-                    <div className="flex min-w-0 flex-col rounded-lg border border-border bg-surface p-3">
-                      <div className="mb-3 flex items-center justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          Extracted Document Text
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-muted-foreground">
-                            {rawText.split(/\s+/).filter(Boolean).length} words · {rawText.length} chars
-                          </span>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                              navigator.clipboard.writeText(rawText);
-                              toast.success("Extracted text copied to clipboard!");
-                            }}
-                          >
-                            <Copy className="mr-1 size-3.5" /> Copy
-                          </Button>
-                        </div>
-                      </div>
-                      <textarea
-                        value={rawText}
-                        onChange={(event) => setRawText(event.target.value)}
-                        placeholder="Extracted text will appear here..."
-                        className="h-[680px] w-full resize-none rounded-lg border border-border bg-background p-4 font-mono text-sm leading-relaxed outline-none focus:border-brand"
-                      />
-                    </div>
-                  ) : (
-                    <div className="min-w-0 rounded-lg border border-border bg-surface p-3">
-                      <div className="mb-3 flex items-center justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          Editable document blocks
-                        </p>
-                        <Button size="sm" variant="outline" onClick={addBlock}>
-                          <Plus className="size-3.5" /> Add block
-                        </Button>
-                      </div>
-                      <div className="max-h-[720px] space-y-3 overflow-y-auto pr-1">
-                        {currentPage?.blocks.map((block, index) => (
-                          <div
-                            key={block.id}
-                            className={`rounded-lg border p-3 ${(block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) && !block.reviewed ? "border-destructive/60 bg-destructive/5" : "border-border bg-background"}`}
-                          >
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Badge
-                                variant={
-                                  block.confidence >= 90
-                                    ? "secondary"
-                                    : block.confidence >= 70
-                                      ? "outline"
-                                      : "destructive"
-                                }
-                              >
-                                {Math.round(block.confidence)}% {confidenceLabel(block.confidence)}
-                              </Badge>
-                              <select
-                                value={block.type}
-                                onChange={(event) =>
-                                  updateBlock(block.id, {
-                                    type: event.target.value as OcrBlockType,
-                                  })
-                                }
-                                className="h-8 rounded border border-border bg-surface px-2 text-xs outline-none focus:border-brand"
-                              >
-                                {blockTypes.map((type) => (
-                                  <option key={type.value} value={type.value}>
-                                    {type.label}
-                                  </option>
-                                ))}
-                              </select>
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                disabled={index === 0}
-                                onClick={() => moveBlock(block.id, -1)}
-                                aria-label="Move block up"
-                              >
-                                <ChevronUp className="size-3.5" />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                disabled={index === currentPage.blocks.length - 1}
-                                onClick={() => moveBlock(block.id, 1)}
-                                aria-label="Move block down"
-                              >
-                                <ChevronDown className="size-3.5" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => splitBlock(block.id)}
-                                aria-label="Split block"
-                              >
-                                Split
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                disabled={index === currentPage.blocks.length - 1}
-                                onClick={() => mergeBlockWithNext(block.id)}
-                                aria-label="Merge block with next"
-                              >
-                                Merge
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant={block.reviewed ? "secondary" : "ghost"}
-                                onClick={() => updateBlock(block.id, { reviewed: !block.reviewed })}
-                                aria-label={
-                                  block.reviewed ? "Unmark block verified" : "Mark block verified"
-                                }
-                                title={block.reviewed ? "Unmark verified" : "Mark verified"}
-                              >
-                                <CheckCircle2 className="size-3.5" />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                onClick={() => deleteBlock(block.id)}
-                                aria-label="Delete block"
-                              >
-                                <Trash2 className="size-3.5" />
-                              </Button>
-                            </div>
-                            {(block.type === "question" || block.type === "subquestion") && (
-                              <div className="mt-2 grid grid-cols-2 gap-2">
-                                <label className="text-xs text-muted-foreground">
-                                  Number
-                                  <input
-                                    value={block.questionNumber || ""}
-                                    onChange={(event) =>
-                                      updateBlock(block.id, { questionNumber: event.target.value })
-                                    }
-                                    className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-sm text-foreground outline-none focus:border-brand"
-                                  />
-                                </label>
-                                <label className="text-xs text-muted-foreground">
-                                  Marks
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={1000}
-                                    value={block.marks ?? ""}
-                                    onChange={(event) =>
-                                      updateBlock(block.id, {
-                                        marks: event.target.value
-                                          ? Number(event.target.value)
-                                          : undefined,
-                                      })
-                                    }
-                                    className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-sm text-foreground outline-none focus:border-brand"
-                                  />
-                                </label>
-                                <label className="text-xs text-muted-foreground">
-                                  Answer lines
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={12}
-                                    value={block.answerLines ?? ""}
-                                    onChange={(event) =>
-                                      updateBlock(block.id, {
-                                        answerLines: event.target.value
-                                          ? Number(event.target.value)
-                                          : undefined,
-                                      })
-                                    }
-                                    className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-sm text-foreground outline-none focus:border-brand"
-                                  />
-                                </label>
-                              </div>
-                            )}
-                            {block.type === "figure" && (
-                              <label className="mt-2 block text-xs text-muted-foreground">
-                                Figure caption
-                                <input
-                                  value={block.caption || ""}
-                                  onChange={(event) =>
-                                    updateBlock(block.id, { caption: event.target.value })
-                                  }
-                                  placeholder="Describe the diagram or figure"
-                                  className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-sm text-foreground outline-none focus:border-brand"
-                                />
-                              </label>
-                            )}
-                            <textarea
-                              value={block.text}
-                              onChange={(event) =>
-                                updateBlock(block.id, { text: event.target.value })
-                              }
-                              className="mt-2 min-h-24 w-full resize-y rounded border border-border bg-surface p-2 text-sm leading-relaxed outline-none focus:border-brand"
-                            />
-                          </div>
-                        ))}
-                        {currentPage?.blocks.length === 0 && (
-                          <p className="py-10 text-center text-sm text-muted-foreground">
-                            No blocks detected on this page. Add one manually.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-5 flex flex-wrap items-end gap-2 border-t border-border pt-5">
-                  <label className="min-w-52 flex-1 text-xs text-muted-foreground">
-                    Revision note
-                    <input
-                      value={revisionNote}
-                      onChange={(event) => setRevisionNote(event.target.value)}
-                      placeholder="What did you correct?"
-                      className="mt-1 h-9 w-full rounded border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-brand"
+                  {enhancedPageUrl ? (
+                    <img
+                      src={enhancedPageUrl}
+                      alt={`Page ${selectedPage}`}
+                      className="max-h-[640px] w-full rounded-lg border border-border bg-white object-contain"
                     />
-                  </label>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={saving || job.status === "published"}
-                    onClick={saveCorrections}
-                  >
-                    {saving ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Save className="size-4" />
-                    )}{" "}
-                    Save revision
-                  </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid`}
-                    >
-                      <Download className="size-4" /> Download OCR Draft PDF
-                    </a>
-                  </Button>
-                  <Button
-                    asChild
-                    size="sm"
-                    disabled={!preflight.data?.preflight.ready || job.status === "published"}
-                  >
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=pdf&layout=clean&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid&final=1`}
-                    >
-                      <CheckCircle2 className="size-4" /> Download Verified PDF
-                    </a>
-                  </Button>
-                  <Button asChild size="sm" variant="outline">
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid`}
-                    >
-                      <FileText className="size-4" /> Download OCR Draft DOCX
-                    </a>
-                  </Button>
-                  <Button
-                    asChild
-                    size="sm"
-                    variant="outline"
-                    disabled={!preflight.data?.preflight.ready || job.status === "published"}
-                  >
-                    <a
-                      href={`/api/ocr/jobs/${job.id}/export?format=docx&template=${exportTemplate}&answerSpace=preserve&visuals=hybrid&final=1`}
-                    >
-                      <FileText className="size-4" /> Download Verified DOCX
-                    </a>
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={saving || job.status === "published"}
-                    onClick={saveCorrections}
-                  >
-                    {saving ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Save className="size-4" />
-                    )}{" "}
-                    Save Edits
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={reprocessing || job.status === "published"}
-                    onClick={reprocessOcr}
-                  >
-                    {reprocessing ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <RotateCcw className="size-4" />
-                    )}{" "}
-                    Reprocess OCR
-                  </Button>
-                  {auth.data?.user ? (
-                    <Button size="sm" disabled={job.status === "published"} onClick={publish}>
-                      {job.status === "published" ? "Published" : "Publish Document"}
-                    </Button>
+                  ) : sourceIsPdf ? (
+                    <iframe
+                      title="PDF View"
+                      src={`${job.sourceUrl}#page=${selectedPage}`}
+                      className="h-[640px] w-full rounded-lg border border-border bg-white"
+                    />
                   ) : (
-                    <Button asChild size="sm" variant="ghost">
-                      <Link to="/login">Log in to publish</Link>
-                    </Button>
+                    <img
+                      src={job.sourceUrl}
+                      alt="Source document"
+                      className="max-h-[640px] w-full rounded-lg border border-border bg-white object-contain"
+                    />
                   )}
                 </div>
 
-                <div className="mt-6 rounded-lg border border-border bg-surface p-4">
-                  <div className="flex items-center gap-2 font-display font-semibold">
-                    <History className="size-4 text-brand" /> Revision history
+                <div className="flex flex-col rounded-xl border border-border bg-card p-3 shadow-soft">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span className="mr-1 text-[11px] font-semibold text-muted-foreground">
+                        Tag selection:
+                      </span>
+                      {semanticTags.map((tag) => (
+                        <button
+                          key={tag.value}
+                          type="button"
+                          onClick={() => applySemanticTag(tag)}
+                          className="rounded border border-border bg-surface px-2 py-0.5 text-[11px] font-medium text-foreground transition hover:border-brand hover:text-brand"
+                        >
+                          {tag.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                    {revisions.data?.revisions.map((revision) => (
-                      <div
-                        key={revision.revision}
-                        className="rounded-lg border border-border bg-background p-3"
-                      >
-                        <div className="flex items-center justify-between">
-                          <p className="text-sm font-semibold">Revision {revision.revision}</p>
-                          {revision.revision === job.revision && (
-                            <Badge variant="secondary">Current</Badge>
-                          )}
-                        </div>
-                        <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                          {revision.note}
-                        </p>
-                        <p className="mt-2 text-[11px] text-muted-foreground">
-                          {revision.createdBy} · {new Date(revision.createdAt).toLocaleString()}
-                        </p>
-                        {revision.revision !== job.revision && job.status !== "published" && (
-                          <Button
-                            className="mt-2"
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => restoreRevision(revision.revision)}
-                          >
-                            <RotateCcw className="size-3.5" /> Restore
-                          </Button>
-                        )}
-                      </div>
-                    ))}
-                    {revisions.isLoading && <Loader2 className="size-4 animate-spin text-brand" />}
-                  </div>
+                  <textarea
+                    ref={textareaRef}
+                    value={rawText}
+                    onChange={(e) => setRawText(e.target.value)}
+                    placeholder="Document text will appear here..."
+                    className="h-[600px] w-full resize-none rounded-lg border border-border bg-background p-4 font-mono text-sm leading-relaxed outline-none focus:border-brand focus:ring-1 focus:ring-brand"
+                  />
                 </div>
-              </>
-            )}
-          </section>
-        </div>
+              </div>
+
+              <div className="rounded-xl border border-border bg-surface p-4">
+                <p className="flex items-center gap-1.5 font-display font-semibold text-sm">
+                  <History className="size-4 text-brand" /> Revision history
+                </p>
+                <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {revisions.data?.revisions.map((rev) => (
+                    <div
+                      key={rev.revision}
+                      className="rounded-lg border border-border bg-card p-3 text-xs"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold">Revision {rev.revision}</span>
+                        {rev.revision === job.revision && <Badge variant="secondary">Current</Badge>}
+                      </div>
+                      <p className="mt-1 text-muted-foreground line-clamp-1">{rev.note}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
       </main>
-      <SiteFooter />
+
+      {publishModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-xl">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="size-6 text-amber-500" />
+                <h3 className="font-display text-lg font-bold">Review Required</h3>
+              </div>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={() => setPublishModalOpen(false)}
+                className="size-7"
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              Some areas have low confidence. Review them, or publish as-is.
+            </p>
+            <div className="mt-6 flex flex-col gap-2">
+              <Button onClick={() => setPublishModalOpen(false)} className="w-full bg-brand">
+                Review issues
+              </Button>
+              <Button variant="outline" onClick={executePublish} className="w-full">
+                Publish anyway
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConfirmModal modalState={confirmModal} />
     </div>
   );
@@ -1203,24 +894,18 @@ function MetadataField({
 }: {
   label: string;
   value: string;
-  onChange: (value: string) => void;
+  onChange: (v: string) => void;
 }) {
   return (
-    <label className="block">
-      <span className="mb-1 block text-xs font-medium text-muted-foreground">{label}</span>
+    <label className="block text-xs">
+      <span className="font-medium text-muted-foreground">{label}</span>
       <input
         value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-9 w-full rounded border border-border bg-background px-2 text-sm outline-none focus:border-brand"
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1 h-8 w-full rounded border border-border bg-background px-2 text-xs outline-none focus:border-brand"
       />
     </label>
   );
-}
-
-function confidenceLabel(value: number) {
-  if (value >= 90) return "high confidence";
-  if (value >= 70) return "review recommended";
-  return "review required";
 }
 
 function formatOcrStage(stage?: string) {
