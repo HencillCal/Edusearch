@@ -188,7 +188,6 @@ function ScannerPage() {
       const form = new FormData();
       for (const file of files) {
         form.append("images", file);
-        form.append("file", file);
       }
       form.append("profile", profile);
       form.append("qualityMode", qualityMode);

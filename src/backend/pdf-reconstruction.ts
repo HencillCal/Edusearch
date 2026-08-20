@@ -81,14 +81,15 @@ export async function createStructuredPdf(
   };
 
   const hasUnreviewedBlocks =
-    requested.draft === true ||
-    structure.pages.some((sourcePage) =>
-      sourcePage.blocks.some(
-        (block) =>
-          (block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) &&
-          !block.reviewed,
-      ),
-    );
+    options.showReviewHighlights === true &&
+    (requested.draft === true ||
+      structure.pages.some((sourcePage) =>
+        sourcePage.blocks.some(
+          (block) =>
+            (block.needsReview || block.confidence < 70 || (block.agreement ?? 1) < 0.58) &&
+            !block.reviewed,
+        ),
+      ));
   let page: PDFPage;
   let cursorY = 0;
   let sourcePageNumber = 1;

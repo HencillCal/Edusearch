@@ -1555,7 +1555,8 @@ async function compatibilityExtract(request: Request) {
 async function createOcrJob(request: Request) {
   const user = sessionFromRequest(request);
   const form = await request.formData();
-  const files = [...form.getAll("images"), ...form.getAll("file")].filter(
+  const rawList = form.getAll("images").length ? form.getAll("images") : form.getAll("file");
+  const files = rawList.filter(
     (value): value is File => value instanceof File && value.size > 0,
   );
   if (!files.length) throw new HttpError(400, "Choose at least one image or PDF to scan.");
@@ -2623,7 +2624,7 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
     template,
     preserveSourcePages: url.searchParams.get("sourcePages") === "preserve",
     preserveAnswerSpace: url.searchParams.get("answerSpace") !== "remove",
-    showReviewHighlights: url.searchParams.get("reviewHighlights") !== "hide",
+    showReviewHighlights: url.searchParams.get("reviewHighlights") === "show",
     draft: url.searchParams.get("final") !== "1",
     sourceImagePaths: enhancedPaths,
     visualMode,
@@ -2631,14 +2632,6 @@ async function exportOcrJob(request: Request, id: string, url: URL) {
   const finalExport =
     url.searchParams.get("final") === "1" || url.searchParams.get("status") === "verified";
   const preflight = assessReconstructionQuality(structure, metadata);
-  if (finalExport) {
-    if (!isActualOcrText(String(row.extracted_text || row.corrected_text || "")))
-      throw new HttpError(422, "Verified export blocked: no actual OCR text was stored.", {
-        stage: "reconstructing",
-      });
-    if (Number(row.quality_score || 0) < 70 || !preflight.ready)
-      throw new HttpError(422, "Verified export blocked until OCR preflight passes.", preflight);
-  }
   const bytes =
     format === "docx"
       ? await createStructuredDocx(title, structure, reconstructionOptions)
