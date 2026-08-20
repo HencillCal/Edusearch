@@ -405,7 +405,7 @@ export async function extractDocument(
     if (parsed.text.trim() || process.env.AUTO_OCR_SCANNED_PDF === "false") {
       return { text: parsed.text, pages: parsed.pages, fileType: "PDF" };
     }
-    const ocr = await runPdfOcr(file.path);
+    const ocr = await runPdfOcr(file.path, { qualityMode: "fast" });
     return {
       text: ocr.text,
       pages: Math.max(parsed.pages, ocr.enhancedPaths.length || 1),
@@ -423,7 +423,7 @@ export async function extractDocument(
     };
   }
   if ([".jpg", ".jpeg", ".png", ".webp", ".heic"].includes(file.extension)) {
-    const result = await runOcr(file.path);
+    const result = await runOcr(file.path, { qualityMode: "fast" });
     return { text: result.text, pages: 1, fileType: "Image" };
   }
   return { text: "", pages: 1, fileType: file.extension === ".zip" ? "ZIP" : "PDF" };
@@ -593,7 +593,12 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
           options.profile,
         );
       }
-      if (candidate.text.trim()) candidates.push(candidate);
+      if (candidate.text.trim()) {
+        candidates.push(candidate);
+        if (candidate.confidence >= 80 && candidate.text.trim().length >= 40) {
+          break;
+        }
+      }
     } catch (error) {
       if (!passErrors.some((item) => item.pass === pass.name))
         passErrors.push({ pass: pass.name, error: errorMessage(error) });
@@ -1621,7 +1626,7 @@ async function prepareOcrVariants(sourcePath: string, options: NormalizedOcrOpti
       : await runPagePreprocessor(sourcePath, rectifiedPath);
   const preprocessingSource = existsSync(rectifiedPath) ? rectifiedPath : sourcePath;
   const targetWidth =
-    options.qualityMode === "accurate" ? 3200 : options.qualityMode === "balanced" ? 2500 : 1800;
+    options.qualityMode === "accurate" ? 2200 : options.qualityMode === "balanced" ? 1800 : 1500;
   await sharp(preprocessingSource, { limitInputPixels: 160_000_000 })
     .rotate()
     .flatten({ background: "#ffffff" })
@@ -1752,30 +1757,24 @@ function selectOcrPasses(
 ) {
   const variant = (name: string) => variants.find((item) => item.name === name) ?? variants[0];
   if (options.qualityMode === "fast")
+    return [{ ...variant("clean"), psm: options.profile === "table" ? 4 : 3 }];
+  if (options.qualityMode === "balanced")
     return [
-      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
+      { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     ];
   if (!nativeAvailable)
     return [
-      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     ];
   const accurate = [
-    { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
     { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
     { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     {
       ...variant("adaptive"),
       psm: options.profile === "notes" ? 6 : options.profile === "mixed" ? 11 : 4,
     },
-    {
-      ...variant("local-contrast"),
-      psm: options.profile === "mixed" ? 11 : options.profile === "table" ? 4 : 6,
-    },
-    { ...variant("line-free"), psm: options.profile === "table" ? 6 : 3 },
-    { ...variant("soft"), psm: options.profile === "mixed" ? 12 : 6 },
   ];
   return accurate.filter(
     (item, index, list) =>
