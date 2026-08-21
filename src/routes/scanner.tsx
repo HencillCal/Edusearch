@@ -123,8 +123,14 @@ function ScannerPage() {
   });
 
   useEffect(() => {
-    if (selectedJob.data?.job) applyJob(selectedJob.data.job);
-  }, [selectedJob.data]);
+    if (selectedJob.data?.job) {
+      applyJob(selectedJob.data.job);
+    } else if (selectedJob.isError && requestedJobId) {
+      setStage("idle");
+      setJob(null);
+      navigate({ to: "/scanner", search: {}, replace: true });
+    }
+  }, [selectedJob.data, selectedJob.isError, requestedJobId]);
 
   const applyJob = (nextJob: OcrJob) => {
     setJob(nextJob);

@@ -44,3 +44,4 @@ data/*
 !data/exports/.gitkeep
 !data/compliance/.gitkeep
 .env
+scratch/

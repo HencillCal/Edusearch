@@ -421,66 +421,74 @@ export function UploadPage() {
 
               <div className="divide-y divide-border/60 rounded-xl border border-border bg-surface/50 max-h-60 overflow-y-auto">
                 {items.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between p-2.5 text-xs">
-                    <div className="flex items-center gap-2.5 min-w-0 flex-1 pr-2">
-                      <span className="shrink-0">{getFileIcon(item.file.name)}</span>
-                      <span className="truncate font-medium text-foreground max-w-[260px] sm:max-w-sm" title={item.file.name}>
-                        {item.file.name}
-                      </span>
-                      <span className="text-[11px] text-muted-foreground shrink-0">
-                        ({formatBytes(item.file.size)})
-                      </span>
-                    </div>
+                  <div key={item.id} className="p-2.5 text-xs space-y-1">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1 pr-2">
+                        <span className="shrink-0">{getFileIcon(item.file.name)}</span>
+                        <span className="truncate font-medium text-foreground max-w-[260px] sm:max-w-sm" title={item.file.name}>
+                          {item.file.name}
+                        </span>
+                        <span className="text-[11px] text-muted-foreground shrink-0">
+                          ({formatBytes(item.file.size)})
+                        </span>
+                      </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      {item.status === "idle" && (
-                        <Badge variant="outline" className="text-[10px] text-muted-foreground">
-                          Ready
-                        </Badge>
-                      )}
-                      {item.status === "uploading" && (
-                        <Badge variant="secondary" className="text-[10px] text-brand">
-                          <Loader2 className="mr-1 size-2.5 animate-spin" /> Uploading
-                        </Badge>
-                      )}
-                      {item.status === "analyzing" && (
-                        <Badge variant="secondary" className="text-[10px] text-brand">
-                          <Loader2 className="mr-1 size-2.5 animate-spin" /> Analyzing
-                        </Badge>
-                      )}
-                      {item.status === "ready" && (
-                        <Badge variant="secondary" className="text-[10px] text-emerald-600 bg-emerald-50">
-                          <CheckCircle2 className="mr-1 size-3" /> Ready
-                        </Badge>
-                      )}
-                      {item.status === "failed" && (
-                        <div className="flex items-center gap-1.5">
-                          <Badge variant="destructive" className="text-[10px] max-w-[140px] truncate" title={item.error}>
-                            Failed
+                      <div className="flex items-center gap-2 shrink-0">
+                        {item.status === "idle" && (
+                          <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                            Ready
                           </Badge>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="size-6 text-brand"
-                            onClick={() => analyzeSingleFileItem(item)}
-                            title="Retry this file"
-                          >
-                            <RefreshCw className="size-3" />
-                          </Button>
-                        </div>
-                      )}
+                        )}
+                        {item.status === "uploading" && (
+                          <Badge variant="secondary" className="text-[10px] text-brand">
+                            <Loader2 className="mr-1 size-2.5 animate-spin" /> Uploading
+                          </Badge>
+                        )}
+                        {item.status === "analyzing" && (
+                          <Badge variant="secondary" className="text-[10px] text-brand">
+                            <Loader2 className="mr-1 size-2.5 animate-spin" /> Analyzing
+                          </Badge>
+                        )}
+                        {item.status === "ready" && (
+                          <Badge variant="secondary" className="text-[10px] text-emerald-600 bg-emerald-50">
+                            <CheckCircle2 className="mr-1 size-3" /> Ready
+                          </Badge>
+                        )}
+                        {item.status === "failed" && (
+                          <div className="flex items-center gap-1.5">
+                            <Badge variant="destructive" className="text-[10px]">
+                              Failed
+                            </Badge>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-6 text-brand"
+                              onClick={() => analyzeSingleFileItem(item)}
+                              title="Retry this file"
+                            >
+                              <RefreshCw className="size-3" />
+                            </Button>
+                          </div>
+                        )}
 
-                      <button
-                        type="button"
-                        onClick={() => removeFile(item.id)}
-                        disabled={isProcessing && item.status === "analyzing"}
-                        className="p-1 text-muted-foreground hover:text-destructive transition rounded"
-                        title="Remove file"
-                      >
-                        <X className="size-3.5" />
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => removeFile(item.id)}
+                          disabled={isProcessing && item.status === "analyzing"}
+                          className="p-1 text-muted-foreground hover:text-destructive transition rounded"
+                          title="Remove file"
+                        >
+                          <X className="size-3.5" />
+                        </button>
+                      </div>
                     </div>
+                    {item.status === "failed" && item.error && (
+                      <div className="text-[11px] text-destructive pl-6 flex items-center gap-1">
+                        <AlertCircle className="size-3 shrink-0" />
+                        <span>{item.error}</span>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

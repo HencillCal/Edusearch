@@ -118,14 +118,16 @@ export async function handleApiRequest(request: Request): Promise<Response | nul
       );
     }
     const err = error instanceof Error ? error : new Error(String(error));
+    const refCode = requestId.replace(/^req_/, "REQ-").toUpperCase();
     console.error(
-      `[EduSearch API Error] requestId=${requestId} route=${request.method} ${url.pathname} message=${err.message}`,
+      `[EduSearch Error] requestId=${requestId} method=${request.method} path=${url.pathname} message=${err.message}`,
       err.stack,
     );
     return secure(
       json(
         {
-          error: "An unexpected error occurred while processing this request. Please try again.",
+          error: `Something went wrong while processing this request. Reference: ${refCode}`,
+          reference: refCode,
           code: "INTERNAL_ERROR",
           requestId,
           retryable: true,
@@ -2035,7 +2037,8 @@ function queueOcrJobProcessing(id: string, source: OcrQueueSource, options: OcrQ
 function resumePendingOcrJobs() {
   if (pendingOcrJobsResumed) return;
   pendingOcrJobsResumed = true;
-  const rows = getDb()
+  const db = getDb();
+  const rows = db
     .prepare(
       `SELECT * FROM ocr_jobs WHERE status='processing' OR (status NOT IN ('ready','awaiting_correction','published','failed') AND processing_stage IN ('uploaded','preprocessing','ocr_running','ocr_completed','layout_analysis','reconstructing'))`,
     )
@@ -2045,11 +2048,19 @@ function resumePendingOcrJobs() {
     const sourceNames = jsonArray(row.source_filenames_json);
     const fallbackPath = String(row.source_path || "");
     const paths = sourcePaths.length ? sourcePaths : fallbackPath ? [fallbackPath] : [];
-    if (!paths.length) continue;
+    const validPaths = paths.filter((p) => p && existsSync(p));
+
+    if (!validPaths.length) {
+      db.prepare(
+        "UPDATE ocr_jobs SET status='failed',processing_stage='failed',error_message='OCR processing was interrupted during server restart. Please re-upload.',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      ).run(String(row.id));
+      continue;
+    }
+
     queueOcrJobProcessing(
       String(row.id),
       {
-        pages: paths.map((sourcePath, index) => ({
+        pages: validPaths.map((sourcePath, index) => ({
           path: sourcePath,
           extension: path.extname(sourcePath).toLowerCase(),
           originalName:
@@ -2058,7 +2069,7 @@ function resumePendingOcrJobs() {
           sha256: "",
           mimeType: "application/octet-stream",
         })),
-        originalPaths: paths,
+        originalPaths: validPaths,
       },
       {
         profile: normalizeOcrProfile(row.ocr_profile),

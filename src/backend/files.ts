@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -397,20 +397,53 @@ async function scanWithClamAv(host: string, port: number, bytes: Buffer): Promis
   });
 }
 
+export async function validatePdfFile(filePath: string): Promise<boolean> {
+  try {
+    const handle = await open(filePath, "r");
+    const buffer = Buffer.alloc(1024);
+    const { bytesRead } = await handle.read(buffer, 0, 1024, 0);
+    await handle.close();
+    if (bytesRead < 4) return false;
+    const header = buffer.subarray(0, bytesRead).toString("latin1");
+    return header.includes("%PDF-");
+  } catch {
+    return false;
+  }
+}
+
 export async function extractDocument(
   file: StoredInput,
 ): Promise<{ text: string; pages: number; fileType: string }> {
   if (file.extension === ".pdf") {
-    const parsed = await parsePdfText(file.path);
-    if (parsed.text.trim() || process.env.AUTO_OCR_SCANNED_PDF === "false") {
-      return { text: parsed.text, pages: parsed.pages, fileType: "PDF" };
+    const isValid = await validatePdfFile(file.path);
+    if (!isValid) {
+      throw new HttpError(
+        422,
+        `"${file.originalName}" is not a valid readable PDF file.`,
+        { code: "INVALID_PDF" },
+      );
     }
-    const ocr = await runPdfOcr(file.path, { qualityMode: "fast" });
-    return {
-      text: ocr.text,
-      pages: Math.max(parsed.pages, ocr.enhancedPaths.length || 1),
-      fileType: "PDF",
-    };
+
+    try {
+      const parsed = await parsePdfText(file.path);
+      if (parsed.text.trim().length > 30 || process.env.AUTO_OCR_SCANNED_PDF === "false") {
+        return { text: parsed.text, pages: parsed.pages || 1, fileType: "PDF" };
+      }
+    } catch {
+      // PDF text layer could not be parsed; try fast OCR
+    }
+
+    try {
+      const ocr = await runPdfOcr(file.path, { qualityMode: "fast" });
+      return {
+        text: ocr.text || "",
+        pages: Math.max(1, ocr.enhancedPaths.length || 1),
+        fileType: "PDF",
+      };
+    } catch {
+      // Scanned PDF with no OCR text; return empty text gracefully so user can upload and title the document
+      return { text: "", pages: 1, fileType: "PDF" };
+    }
   }
   if (file.extension === ".docx") {
     const archive = unzipSync(new Uint8Array(await readFile(file.path)));
@@ -1760,19 +1793,25 @@ function selectOcrPasses(
 ) {
   const variant = (name: string) => variants.find((item) => item.name === name) ?? variants[0];
   if (options.qualityMode === "fast")
-    return [{ ...variant("clean"), psm: options.profile === "table" ? 4 : 3 }];
+    return [
+      { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
+      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
+    ];
   if (options.qualityMode === "balanced")
     return [
       { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
+      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     ];
   if (!nativeAvailable)
     return [
       { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
+      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
       { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     ];
   const accurate = [
     { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
+    { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
     { ...variant("binary"), psm: options.profile === "notes" ? 6 : 4 },
     {
       ...variant("adaptive"),
@@ -3922,10 +3961,20 @@ export async function runMultiPageOcr(
 }
 
 export async function ocrEngineHealth() {
+  const tesseract = await commandAvailable("tesseract");
+  const poppler = await commandAvailable("pdftoppm");
+  const python = await resolvePythonCommand();
+  const hasLocalEngData =
+    existsSync(path.join(process.cwd(), "eng.traineddata")) ||
+    existsSync(path.join(dataDir, "tessdata", "eng.traineddata")) ||
+    existsSync(path.join(process.cwd(), "node_modules", "@tesseract.js-data", "eng", "4.0.0", "eng.traineddata.gz"));
+
   return {
-    tesseractAvailable: true,
-    sharpAvailable: true,
-    popplerAvailable: true,
+    tesseract: tesseract ? "available" : "unavailable",
+    eng: tesseract || hasLocalEngData ? "available" : "unavailable",
+    opencv: python ? "available" : "optional_unavailable",
+    sharp: "available",
+    poppler: poppler ? "available" : "optional_unavailable",
     concurrency: Number(process.env.OCR_CONCURRENCY || 3),
   };
 }

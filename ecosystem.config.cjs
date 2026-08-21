@@ -2,6 +2,7 @@ module.exports = {
   apps: [
     {
       name: "edusearch",
+      cwd: "/var/www/edusearch",
       script: ".output/server/index.mjs",
       instances: 1,
       exec_mode: "fork",

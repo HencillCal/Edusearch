@@ -15,11 +15,26 @@ type ProviderAttempt = {
   provider: string;
   model: string;
   keySlot: number;
+  timeoutMs: number;
   run: () => Promise<string>;
 };
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Circuit breaker state
+const providerCooldowns = new Map<string, number>();
+const misconfiguredProviders = new Set<string>();
+
+export function getProviderHealthSummary() {
+  const now = Date.now();
+  return {
+    cooldowns: Array.from(providerCooldowns.entries())
+      .filter(([, expires]) => expires > now)
+      .map(([provider, expires]) => ({ provider, remainingSec: Math.ceil((expires - now) / 1000) })),
+    misconfigured: Array.from(misconfiguredProviders),
+  };
+}
 
 function keys(name: string) {
   return String(process.env[name] || "")
@@ -37,7 +52,14 @@ function models(name: string, defaults: string[]) {
 }
 
 function isRetryableMessage(message: string) {
-  return /429|quota|rate limit|resource exhausted|503|service unavailable|overloaded|high demand|try again later|timeout/i.test(
+  return /429|quota|rate limit|resource exhausted|503|service unavailable|overloaded|high demand|try again later|timeout|fetch failed/i.test(
+    message,
+  );
+}
+
+function isMisconfigurationMessage(status: number, message: string) {
+  if (status === 401 || status === 403) return true;
+  return /invalid[ _]?api[ _]?key|authentication failed|permission denied|unauthorized|account inactive/i.test(
     message,
   );
 }
@@ -69,6 +91,8 @@ async function runAttempt(
   maxRetries: number,
   attempts: VisionProviderResult["attempts"],
 ) {
+  const providerKey = `${attempt.provider}:${attempt.model}:${attempt.keySlot}`;
+
   for (let retry = 0; retry <= maxRetries; retry += 1) {
     try {
       const text = (await attempt.run()).trim();
@@ -78,19 +102,36 @@ async function runAttempt(
         keySlot: attempt.keySlot,
         outcome: text ? `success:${text.length}` : "empty-response",
       });
+      // Clear cooldown on success
+      providerCooldowns.delete(attempt.provider);
       return text;
     } catch (error) {
       const status = Number((error as { status?: number })?.status || 0);
       const message = error instanceof Error ? error.message : String(error);
-      const retryable = RETRYABLE_STATUS.has(status) || isRetryableMessage(message);
+      const isMisconfig = isMisconfigurationMessage(status, message);
+      const retryable = !isMisconfig && (RETRYABLE_STATUS.has(status) || isRetryableMessage(message));
+
       attempts.push({
         provider: attempt.provider,
         model: attempt.model,
         keySlot: attempt.keySlot,
         outcome: `error:${message.slice(0, 180)}`,
       });
-      if (!retryable || retry >= maxRetries) throw error;
-      await sleep(Math.min(8_000, 750 * 2 ** retry));
+
+      if (isMisconfig) {
+        misconfiguredProviders.add(providerKey);
+        // Do not retry misconfigured credentials
+        throw error;
+      }
+
+      if (retryable && retry < maxRetries) {
+        await sleep(Math.min(3_000, 500 * 2 ** retry));
+        continue;
+      }
+
+      // Mark cooldown for 60s on failure
+      providerCooldowns.set(attempt.provider, Date.now() + 60_000);
+      throw error;
     }
   }
   return "";
@@ -104,12 +145,14 @@ function openAiAttempts(
   base64: string,
   mimeType: string,
   language: string,
+  timeoutMs: number,
 ): ProviderAttempt[] {
   return modelList.flatMap((model) =>
     keysList.map((key, index) => ({
       provider,
       model,
       keySlot: index + 1,
+      timeoutMs,
       run: async () => {
         const payload = await fetchJson(
           `${baseUrl.replace(/\/$/, "")}/chat/completions`,
@@ -140,7 +183,7 @@ function openAiAttempts(
               ],
             }),
           },
-          Number(process.env.OCR_PROVIDER_TIMEOUT_MS || 45_000),
+          timeoutMs,
         );
         const choices = Array.isArray(payload.choices) ? payload.choices : [];
         const message = choices[0] as Record<string, unknown> | undefined;
@@ -150,16 +193,23 @@ function openAiAttempts(
   );
 }
 
-function providerAttempts(base64: string, mimeType: string, language: string) {
+function providerAttempts(
+  base64: string,
+  mimeType: string,
+  language: string,
+  timeoutMs: number,
+) {
   const attempts: ProviderAttempt[] = [];
   const geminiKeys = keys("GEMINI_API_KEYS").concat(keys("API_KEYS"));
   const geminiModels = models("GEMINI_MODELS", ["gemini-2.5-flash", "gemini-2.0-flash"]);
-  for (const model of geminiModels)
-    for (const [index, key] of geminiKeys.entries())
+
+  for (const model of geminiModels) {
+    for (const [index, key] of geminiKeys.entries()) {
       attempts.push({
         provider: "gemini",
         model,
         keySlot: index + 1,
+        timeoutMs,
         run: async () => {
           const payload = await fetchJson(
             `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,
@@ -180,7 +230,7 @@ function providerAttempts(base64: string, mimeType: string, language: string) {
                 generationConfig: { temperature: 0 },
               }),
             },
-            Number(process.env.OCR_PROVIDER_TIMEOUT_MS || 45_000),
+            timeoutMs,
           );
           const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
           const content = candidates[0] as Record<string, unknown> | undefined;
@@ -194,6 +244,8 @@ function providerAttempts(base64: string, mimeType: string, language: string) {
           return parts.map((part) => String(part.text || "")).join("\n");
         },
       });
+    }
+  }
 
   attempts.push(
     ...openAiAttempts(
@@ -204,6 +256,7 @@ function providerAttempts(base64: string, mimeType: string, language: string) {
       base64,
       mimeType,
       language,
+      timeoutMs,
     ),
     ...openAiAttempts(
       "openai",
@@ -213,6 +266,7 @@ function providerAttempts(base64: string, mimeType: string, language: string) {
       base64,
       mimeType,
       language,
+      timeoutMs,
     ),
     ...openAiAttempts(
       "groq",
@@ -222,6 +276,7 @@ function providerAttempts(base64: string, mimeType: string, language: string) {
       base64,
       mimeType,
       language,
+      timeoutMs,
     ),
   );
   return attempts;
@@ -237,16 +292,11 @@ function resultScore(text: string) {
   return Math.max(0, Math.min(100, Math.round(readable * 70 + Math.min(30, structure * 3))));
 }
 
-/**
- * Reference-provider cascade adapted from TextScan. It is intentionally optional:
- * no configured key means no network call, while OCRTextract can be deployed as a
- * local/private service without putting credentials in EduSearch.
- */
 export async function runVisionProviderCascade(
   imagePath: string,
   mimeType: string,
   language: string,
-  mode: "fast" | "accurate" = "accurate",
+  mode: "fast" | "balanced" | "accurate" = "balanced",
 ): Promise<VisionProviderResult[]> {
   const results: VisionProviderResult[] = [];
   const startedAt = Date.now();
@@ -261,12 +311,21 @@ export async function runVisionProviderCascade(
       : bytes;
   const base64 = prepared.toString("base64");
   const externalUrl = String(process.env.OCR_TEXTRACT_URL || "").replace(/\/$/, "");
+
+  const timeoutMs =
+    mode === "fast"
+      ? 15_000
+      : mode === "balanced"
+        ? 20_000
+        : Number(process.env.OCR_PROVIDER_TIMEOUT_MS || 35_000);
+
   const candidates: ProviderAttempt[] = [];
   if (externalUrl) {
     candidates.push({
       provider: "OCRTextract",
       model: "pytesseract-ensemble",
       keySlot: 0,
+      timeoutMs,
       run: async () => {
         const payload = await fetchJson(
           `${externalUrl}/ocr-api/unified`,
@@ -275,50 +334,38 @@ export async function runVisionProviderCascade(
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ image: base64, lang: language }),
           },
-          Number(process.env.OCR_PROVIDER_TIMEOUT_MS || 45_000),
+          timeoutMs,
         );
         return String(payload.text || "");
       },
     });
   }
-  candidates.push(...providerAttempts(base64, mimeType, language));
+  candidates.push(...providerAttempts(base64, mimeType, language, timeoutMs));
   if (!candidates.length) return results;
 
-  const limit = mode === "fast" ? 1 : Math.max(1, Number(process.env.OCR_VISION_MAX_RESULTS || 3));
-  if (mode === "fast") {
-    for (const candidate of candidates) {
-      try {
-        const text = await runAttempt(
-          candidate,
-          Number(process.env.OCR_PROVIDER_RETRIES || 2),
-          attempts,
-        );
-        if (text && resultScore(text) >= Number(process.env.OCR_MIN_EXTERNAL_SCORE || 35)) {
-          results.push({
-            text,
-            provider: candidate.provider,
-            model: candidate.model,
-            confidence: null,
-            durationMs: Date.now() - startedAt,
-            attempts,
-            warnings: [],
-          });
-          break;
-        }
-      } catch {
-        // Continue to the next key/model/provider.
-      }
-    }
-  } else {
-    for (const candidate of candidates) {
-      if (results.length >= limit) break;
-      try {
-        const text = await runAttempt(
-          candidate,
-          Number(process.env.OCR_PROVIDER_RETRIES || 2),
-          attempts,
-        );
-        if (!text) continue;
+  // Filter candidates by circuit breaker
+  const now = Date.now();
+  const availableCandidates = candidates.filter((c) => {
+    const providerKey = `${c.provider}:${c.model}:${c.keySlot}`;
+    if (misconfiguredProviders.has(providerKey)) return false;
+    const cooldownExpires = providerCooldowns.get(c.provider) || 0;
+    return cooldownExpires <= now;
+  });
+
+  if (!availableCandidates.length) return results;
+
+  // Mode limits: Fast = 1 attempt, Balanced = max 2 attempts, Accurate = max 3 attempts
+  const maxAttemptsToTry = mode === "fast" ? 1 : mode === "balanced" ? 2 : 3;
+  const retriesPerAttempt = Number(process.env.OCR_PROVIDER_RETRIES || 1);
+
+  let triedCount = 0;
+  for (const candidate of availableCandidates) {
+    if (triedCount >= maxAttemptsToTry) break;
+    triedCount++;
+
+    try {
+      const text = await runAttempt(candidate, retriesPerAttempt, attempts);
+      if (text && resultScore(text) >= Number(process.env.OCR_MIN_EXTERNAL_SCORE || 35)) {
         results.push({
           text,
           provider: candidate.provider,
@@ -328,10 +375,13 @@ export async function runVisionProviderCascade(
           attempts: [...attempts],
           warnings: [],
         });
-      } catch {
-        // Continue to the next model, key, and provider.
+        // Fast & Balanced stop on first strong result
+        if (mode === "fast" || mode === "balanced") break;
       }
+    } catch {
+      // Continue to next available candidate
     }
   }
+
   return results.sort((left, right) => resultScore(right.text) - resultScore(left.text));
 }
