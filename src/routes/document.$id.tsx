@@ -7,21 +7,30 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Eye,
+  FileText,
   Flag,
   FolderPlus,
+  Info,
+  Layers,
   Loader2,
   Maximize2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Printer,
   Search,
   Share2,
-  Scale,
   Star,
+  X,
   ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
-import { CompactDocumentCard } from "@/components/document-card";
+import { CompactDocumentCard, SaveToCollectionModal, cleanDocumentTitle } from "@/components/document-card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PromptModal, type PromptModalState } from "@/components/ui/prompt-dialog";
@@ -42,17 +51,42 @@ export const Route = createFileRoute("/document/$id")({
 
 type DetailResponse = { document: ApiDocument; related: ApiDocument[] };
 
+function HighlightedSnippet({ value }: { value: string }) {
+  if (!value) return null;
+  const parts = value.split(/(<mark>.*?<\/mark>)/g);
+  return (
+    <>
+      {parts.map((part, index) => {
+        if (part.startsWith("<mark>") && part.endsWith("</mark>")) {
+          return (
+            <mark key={index} className="rounded bg-brand/20 px-1 py-0.5 font-medium text-brand">
+              {part.slice(6, -7)}
+            </mark>
+          );
+        }
+        return <span key={index}>{part}</span>;
+      })}
+    </>
+  );
+}
+
 function DocumentViewer() {
   const { id } = Route.useParams();
   const viewerSearch = Route.useSearch();
   const queryClient = useQueryClient();
   const auth = useAuth();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+
   const [page, setPage] = useState<number>(viewerSearch.page ?? 1);
-  const [zoom, setZoom] = useState<number>(100);
+  const [zoom, setZoom] = useState<"fit" | number>("fit");
+  const [showPagesSidebar, setShowPagesSidebar] = useState(false);
+  const [showDetailsSidebar, setShowDetailsSidebar] = useState(true);
+  const [showSearchDrawer, setShowSearchDrawer] = useState(Boolean(viewerSearch.q));
   const [insideSearch, setInsideSearch] = useState(viewerSearch.q ?? "");
-  const [collectionId, setCollectionId] = useState("");
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
   const [promptModal, setPromptModal] = useState<PromptModalState | null>(null);
+  const [pdfLoaded, setPdfLoaded] = useState(false);
+
   const fallback = getDocument(id);
   const detail = useQuery({
     queryKey: ["document", id],
@@ -66,15 +100,7 @@ function DocumentViewer() {
       : undefined,
     retry: false,
   });
-  const collections = useQuery({
-    queryKey: ["collections"],
-    queryFn: () =>
-      apiFetch<{ collections: Array<{ id: string; name: string; count: number }> }>(
-        "/api/collections",
-      ),
-    enabled: typeof window !== "undefined" && Boolean(auth.data?.user),
-    retry: false,
-  });
+
   const insideMatches = useQuery({
     queryKey: ["document-search", id, insideSearch.trim()],
     queryFn: () =>
@@ -88,21 +114,25 @@ function DocumentViewer() {
 
   if (detail.isLoading || !detail.data) {
     return (
-      <div className="min-h-screen">
+      <div className="min-h-screen flex flex-col bg-background">
         <SiteHeader />
-        <main className="grid min-h-[60vh] place-items-center">
-          <Loader2 className="size-8 animate-spin text-brand" />
+        <main className="grid flex-1 place-items-center">
+          <div className="flex flex-col items-center gap-2 text-muted-foreground">
+            <Loader2 className="size-8 animate-spin text-brand" />
+            <p className="text-sm">Loading document...</p>
+          </div>
         </main>
         <SiteFooter />
       </div>
     );
   }
+
   if (detail.isError) {
     return (
-      <div className="min-h-screen">
+      <div className="min-h-screen flex flex-col bg-background">
         <SiteHeader />
-        <main className="mx-auto max-w-xl px-4 py-20 text-center">
-          <h1 className="text-3xl">Document unavailable</h1>
+        <main className="mx-auto max-w-xl px-4 py-20 text-center flex-1">
+          <h1 className="text-3xl font-display">Document unavailable</h1>
           <p className="mt-3 text-sm text-muted-foreground">{detail.error.message}</p>
           <Button asChild className="mt-6">
             <Link to="/search" search={{ q: "" }}>
@@ -118,52 +148,20 @@ function DocumentViewer() {
   const doc = detail.data.document;
   const related = detail.data.related;
   const safePage = Math.min(Math.max(1, page), Math.max(1, doc.pages));
-  const preview = `${downloadUrl(doc.id, true)}#page=${safePage}&zoom=${zoom}`;
+  const displayTitle = cleanDocumentTitle(doc.title);
 
-  const toggleSave = async () => {
-    if (!auth.data?.user) return toast.error("Log in to save documents");
-    try {
-      if (doc.isSaved) {
-        await apiFetch(`/api/saved/${encodeURIComponent(doc.id)}`, { method: "DELETE" });
-        toast.success("Document removed from saved list");
-      } else {
-        await apiFetch(`/api/saved/${encodeURIComponent(doc.id)}`, { method: "POST" });
-        toast.success("Document saved");
-      }
-      await queryClient.invalidateQueries({ queryKey: ["document", id] });
-      await queryClient.invalidateQueries({ queryKey: ["saved"] });
-      await queryClient.invalidateQueries({ queryKey: ["home"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not save document");
-    }
-  };
-
-  const addToCollection = async () => {
-    if (!collectionId) return toast.error("Choose a collection");
-    try {
-      await apiFetch(`/api/collections/${encodeURIComponent(collectionId)}/documents`, {
-        method: "POST",
-        body: JSON.stringify({ documentId: doc.id }),
-      });
-      toast.success("Document added to collection");
-      await queryClient.invalidateQueries({ queryKey: ["saved"] });
-      await queryClient.invalidateQueries({ queryKey: ["collections"] });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not add document to collection");
-    }
-  };
+  const zoomParam = zoom === "fit" ? "page-width" : `${zoom}`;
+  const previewUrl = `${downloadUrl(doc.id, true)}#page=${safePage}&view=${zoomParam}`;
 
   const share = async () => {
     const url = window.location.href;
     try {
-      if (navigator.share) await navigator.share({ title: doc.title, url });
+      if (navigator.share) await navigator.share({ title: displayTitle, url });
       else {
         await navigator.clipboard.writeText(url);
         toast.success("Document link copied");
       }
-    } catch {
-      // Native share may be cancelled.
-    }
+    } catch {}
   };
 
   const rate = async (rating: number) => {
@@ -175,7 +173,6 @@ function DocumentViewer() {
       });
       toast.success(`Rated ${rating} out of 5`);
       await queryClient.invalidateQueries({ queryKey: ["document", id] });
-      await queryClient.invalidateQueries({ queryKey: ["home"] });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save rating");
     }
@@ -228,328 +225,410 @@ function DocumentViewer() {
   };
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen flex flex-col bg-background">
       <SiteHeader />
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
-        <div className="flex flex-col gap-8 lg:flex-row">
-          <div className="min-w-0 flex-1">
-            <h1 className="text-3xl">{doc.title}</h1>
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              <Badge variant="secondary">{doc.docType}</Badge>
-              <Badge variant="outline">{doc.subject}</Badge>
-              <Badge variant="outline">{doc.level}</Badge>
-              <Badge variant="outline">{doc.year}</Badge>
-              <Badge variant="outline">{doc.language}</Badge>
-              {doc.libraryName && (
-                <Badge variant="outline">
-                  {doc.visibility === "library" ? "Members only" : "Library"}: {doc.libraryName}
-                </Badge>
-              )}
-              {doc.rightsStatus === "claimed" && (
-                <Badge variant="outline">Rights review pending</Badge>
-              )}
-              {auth.data?.user?.role === "admin" &&
-                doc.rightsStatus &&
-                doc.rightsStatus !== "clear" && (
-                  <Badge variant="destructive">Rights: {doc.rightsStatus}</Badge>
-                )}
-            </div>
 
-            <div className="mt-6 rounded-xl border border-border bg-card shadow-soft">
-              <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
+      <main className="mx-auto w-full max-w-7xl px-4 py-5 sm:px-6 flex-1 flex flex-col">
+        {/* Document Title Header */}
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-xl sm:text-2xl font-display font-semibold text-foreground truncate">
+              {displayTitle}
+            </h1>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <Badge variant="secondary" className="px-2 py-0.5 text-[11px] font-medium">
+                {doc.docType}
+              </Badge>
+              <Badge variant="outline" className="px-2 py-0.5 text-[11px]">
+                {doc.subject}
+              </Badge>
+              <span>{doc.year ? `${doc.year} · ` : ""}{doc.pages} pages</span>
+              {doc.institution && doc.institution !== "Unknown" && (
+                <span>· {doc.institution}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="default" className="h-8 px-3 text-xs" asChild>
+              <a href={downloadUrl(doc.id, doc.fileType === "DOCX")}>
+                <Download className="mr-1.5 size-3.5" /> Download {doc.fileType}
+              </a>
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 px-2.5 text-xs"
+              onClick={() => setSaveModalOpen(true)}
+            >
+              {doc.isSaved ? (
+                <BookmarkCheck className="mr-1.5 size-3.5 text-brand fill-brand/20" />
+              ) : (
+                <Bookmark className="mr-1.5 size-3.5" />
+              )}
+              {doc.isSaved ? "Saved" : "Save"}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-8 px-2" onClick={share} title="Share">
+              <Share2 className="size-3.5" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Main Viewer & Collapsible Sidebars Grid */}
+        <div className="relative flex flex-1 flex-col lg:flex-row gap-4 min-h-[680px]">
+          {/* Main PDF Viewer Pane */}
+          <div className="relative flex flex-1 flex-col min-w-0 rounded-xl border border-border bg-card shadow-soft overflow-hidden">
+            {/* Viewer Top Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/80 bg-surface/50 px-3 py-2 text-xs">
+              <div className="flex items-center gap-1.5">
+                {/* Toggle Thumbnail Sidebar */}
                 <Button
-                  variant="outline"
+                  variant={showPagesSidebar ? "secondary" : "ghost"}
                   size="sm"
-                  onClick={() => setPage((value) => Math.max(1, value - 1))}
+                  className="h-7 px-2 text-xs font-normal"
+                  onClick={() => setShowPagesSidebar((v) => !v)}
+                  title="Toggle page thumbnails"
                 >
-                  <ChevronLeft className="size-4" />
+                  <Layers className="mr-1 size-3.5" /> Pages
                 </Button>
-                <span className="text-sm text-muted-foreground">
-                  Page {safePage} of {doc.pages}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPage((value) => Math.min(doc.pages, value + 1))}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-                <div className="ml-auto flex flex-wrap gap-1.5">
+
+                {/* Page Navigation */}
+                <div className="flex items-center gap-1 border-l border-border/60 pl-2">
                   <Button
                     variant="ghost"
-                    size="sm"
-                    onClick={() => setZoom((value) => (value >= 175 ? 75 : value + 25))}
+                    size="icon"
+                    className="size-7"
+                    disabled={safePage <= 1}
+                    onClick={() => setPage((v) => Math.max(1, v - 1))}
                   >
-                    <ZoomIn className="size-4" /> {zoom}%
+                    <ChevronLeft className="size-3.5" />
                   </Button>
+                  <span className="px-1 text-[11px] font-medium text-muted-foreground">
+                    {safePage} / {doc.pages}
+                  </span>
                   <Button
                     variant="ghost"
-                    size="sm"
-                    onClick={() => iframeRef.current?.requestFullscreen()}
+                    size="icon"
+                    className="size-7"
+                    disabled={safePage >= doc.pages}
+                    onClick={() => setPage((v) => Math.min(doc.pages, v + 1))}
                   >
-                    <Maximize2 className="size-4" /> Full screen
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => document.getElementById("inside-search")?.focus()}
-                  >
-                    <Search className="size-4" /> Search inside
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      window.open(downloadUrl(doc.id, true), "_blank", "noopener,noreferrer")
-                    }
-                  >
-                    <Printer className="size-4" /> Print
+                    <ChevronRight className="size-3.5" />
                   </Button>
                 </div>
               </div>
 
-              <div className="p-4">
-                <iframe
-                  ref={iframeRef}
-                  key={preview}
-                  title={`${doc.title} preview`}
-                  src={preview}
-                  className="h-[72vh] min-h-[620px] w-full rounded-lg border border-border bg-white shadow-inner"
-                />
+              {/* Center/Right Toolbar Actions */}
+              <div className="flex items-center gap-1.5">
+                {/* Search Document inside button */}
+                <Button
+                  variant={showSearchDrawer ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-7 px-2 text-xs font-normal"
+                  onClick={() => setShowSearchDrawer((v) => !v)}
+                >
+                  <Search className="mr-1 size-3.5" /> Search
+                </Button>
+
+                {/* Fit Width / Zoom */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs font-normal"
+                  onClick={() => setZoom((z) => (z === "fit" ? 100 : z === 100 ? 125 : z === 125 ? 150 : "fit"))}
+                  title="Zoom level"
+                >
+                  <ZoomIn className="mr-1 size-3.5" /> {zoom === "fit" ? "Fit width" : `${zoom}%`}
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  onClick={() => iframeRef.current?.requestFullscreen()}
+                  title="Full screen"
+                >
+                  <Maximize2 className="size-3.5" />
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  onClick={() => window.open(downloadUrl(doc.id, true), "_blank", "noopener,noreferrer")}
+                  title="Print"
+                >
+                  <Printer className="size-3.5" />
+                </Button>
+
+                {/* Toggle Details Sidebar */}
+                <Button
+                  variant={showDetailsSidebar ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-7 px-2 text-xs font-normal hidden lg:flex"
+                  onClick={() => setShowDetailsSidebar((v) => !v)}
+                  title="Toggle details sidebar"
+                >
+                  <Info className="mr-1 size-3.5" /> Details
+                </Button>
               </div>
             </div>
 
-            <div className="mt-5 rounded-xl border border-border bg-card p-5 shadow-soft">
-              <label className="block">
-                <span className="mb-2 block text-sm font-semibold">
-                  Search extracted document text
-                </span>
-                <input
-                  id="inside-search"
-                  value={insideSearch}
-                  onChange={(event) => setInsideSearch(event.target.value)}
-                  placeholder="Enter an exact question or phrase"
-                  className="h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm outline-none focus:border-brand"
+            {/* Viewer Workspace with optional Thumbnail Rail and Search Overlay */}
+            <div className="relative flex flex-1 min-h-[580px] overflow-hidden bg-muted/20">
+              {/* Optional Thin Thumbnail Rail (112px) */}
+              {showPagesSidebar && (
+                <aside className="w-28 shrink-0 border-r border-border bg-card/60 p-2 overflow-y-auto space-y-2 overscroll-contain">
+                  <div className="text-[11px] font-semibold text-muted-foreground uppercase px-1 pb-1">
+                    Pages ({doc.pages})
+                  </div>
+                  {Array.from({ length: doc.pages }).map((_, idx) => {
+                    const pageNum = idx + 1;
+                    const isCurrent = pageNum === safePage;
+                    return (
+                      <button
+                        key={pageNum}
+                        type="button"
+                        onClick={() => setPage(pageNum)}
+                        className={`flex flex-col items-center w-full rounded border p-1 transition ${
+                          isCurrent
+                            ? "border-brand bg-brand-soft/80 text-brand ring-1 ring-brand"
+                            : "border-border/60 bg-surface hover:border-brand/40 text-muted-foreground"
+                        }`}
+                      >
+                        <div className="aspect-[3/4] w-full rounded bg-muted/30 grid place-items-center border border-border/30">
+                          <FileText className="size-4 opacity-40" />
+                        </div>
+                        <span className="mt-1 text-[10px] font-medium">{pageNum}</span>
+                      </button>
+                    );
+                  })}
+                </aside>
+              )}
+
+              {/* Main Reading Canvas / Iframe */}
+              <div className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto flex items-center justify-center p-2 sm:p-4 bg-muted/10">
+                {!pdfLoaded && (
+                  <div className="absolute inset-0 z-10 grid place-items-center bg-background/50 backdrop-blur-xs">
+                    <div className="flex flex-col items-center gap-2">
+                      <Loader2 className="size-6 animate-spin text-brand" />
+                      <span className="text-xs text-muted-foreground font-medium">Loading page 1...</span>
+                    </div>
+                  </div>
+                )}
+                <iframe
+                  ref={iframeRef}
+                  key={previewUrl}
+                  title={`${doc.title} preview`}
+                  src={previewUrl}
+                  onLoad={() => setPdfLoaded(true)}
+                  className="h-full w-full min-h-[580px] rounded-lg border border-border bg-white shadow-inner"
+                  style={{ minWidth: 0, maxWidth: "100%" }}
                 />
-              </label>
-              {insideSearch.trim().length >= 2 && (
-                <div className="mt-3 space-y-2">
-                  {insideMatches.isFetching && (
-                    <p className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="size-4 animate-spin" /> Searching indexed document pages…
-                    </p>
-                  )}
-                  {insideMatches.isError && (
-                    <p className="text-sm text-destructive">{insideMatches.error.message}</p>
-                  )}
-                  {!insideMatches.isFetching && insideMatches.data?.matches.length === 0 && (
-                    <p className="text-sm text-muted-foreground">
-                      No indexed match found in this document.
-                    </p>
-                  )}
-                  {insideMatches.data?.matches.map((match) => (
-                    <button
-                      key={match.id}
-                      type="button"
-                      onClick={() => {
-                        setPage(match.page);
-                        document
-                          .querySelector('iframe[title$=" preview"]')
-                          ?.scrollIntoView({ behavior: "smooth", block: "start" });
-                      }}
-                      className="block w-full rounded-lg border border-border bg-surface px-3 py-3 text-left transition hover:border-brand hover:bg-brand-soft/40"
+              </div>
+
+              {/* Search Inside Document Slide-Over Panel */}
+              {showSearchDrawer && (
+                <div className="absolute top-0 right-0 z-20 h-full w-80 max-w-[90vw] border-l border-border bg-card shadow-lg flex flex-col">
+                  <div className="flex items-center justify-between border-b border-border p-3">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                      <Search className="size-3.5 text-brand" /> Search in Document
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-6 rounded-md"
+                      onClick={() => setShowSearchDrawer(false)}
                     >
-                      <span className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-brand">
-                        Page {match.page}
-                        {match.heading && (
-                          <span className="text-muted-foreground">· {match.heading}</span>
-                        )}
-                        {match.exact && <Badge variant="secondary">Exact phrase</Badge>}
-                      </span>
-                      <span className="text-sm leading-relaxed">
-                        <HighlightedSnippet value={match.highlightedSnippet} />
-                      </span>
-                    </button>
-                  ))}
+                      <X className="size-3.5" />
+                    </Button>
+                  </div>
+
+                  <div className="p-3 border-b border-border/60">
+                    <input
+                      value={insideSearch}
+                      onChange={(e) => setInsideSearch(e.target.value)}
+                      placeholder="Type a word or phrase..."
+                      className="h-8 w-full rounded-md border border-border bg-surface px-2.5 text-xs outline-none focus:border-brand"
+                    />
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                    {insideSearch.trim().length < 2 && (
+                      <p className="text-center py-6 text-xs text-muted-foreground">
+                        Type at least 2 letters to find matches across all pages.
+                      </p>
+                    )}
+                    {insideMatches.isFetching && (
+                      <div className="flex items-center justify-center py-6 text-xs text-muted-foreground">
+                        <Loader2 className="mr-2 size-3.5 animate-spin" /> Searching indexed pages...
+                      </div>
+                    )}
+                    {!insideMatches.isFetching && insideSearch.trim().length >= 2 && insideMatches.data?.matches.length === 0 && (
+                      <p className="text-center py-6 text-xs text-muted-foreground">
+                        No matches found in this document.
+                      </p>
+                    )}
+                    {insideMatches.data?.matches.map((match) => (
+                      <button
+                        key={match.id}
+                        type="button"
+                        onClick={() => setPage(match.page)}
+                        className="w-full text-left rounded-lg border border-border bg-surface p-2.5 transition hover:border-brand hover:bg-brand-soft/30"
+                      >
+                        <div className="flex items-center justify-between text-[11px] font-semibold text-brand mb-1">
+                          <span>Page {match.page}</span>
+                          {match.heading && (
+                            <span className="text-[10px] text-muted-foreground truncate max-w-[120px]">
+                              {match.heading}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs leading-relaxed line-clamp-3 text-foreground/90">
+                          <HighlightedSnippet value={match.highlightedSnippet} />
+                        </p>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
           </div>
 
-          <aside className="lg:w-80 lg:shrink-0">
-            <div className="rounded-xl border border-border bg-card p-5 shadow-soft">
-              <div className="space-y-2">
-                <Button asChild className="w-full">
-                  <a href={downloadUrl(doc.id)}>
-                    <Download className="size-4" /> Download {doc.fileType}
-                  </a>
-                </Button>
-                {doc.fileType === "DOCX" && (
-                  <Button asChild variant="outline" className="w-full">
-                    <a href={downloadUrl(doc.id, true)}>
-                      <Download className="size-4" /> Download PDF preview
-                    </a>
+          {/* Right Metadata & Community Sidebar */}
+          {showDetailsSidebar && (
+            <aside className="w-full lg:w-72 lg:shrink-0 space-y-4">
+              {/* Meaningful Metadata Card (hides Unknown/Unspecified noise) */}
+              <div className="rounded-xl border border-border bg-card p-4 shadow-soft">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                  Document Details
+                </h3>
+
+                <dl className="space-y-2 text-xs">
+                  <div className="flex justify-between py-1 border-b border-border/40">
+                    <dt className="text-muted-foreground">Type</dt>
+                    <dd className="font-medium text-foreground">{doc.docType}</dd>
+                  </div>
+                  <div className="flex justify-between py-1 border-b border-border/40">
+                    <dt className="text-muted-foreground">Subject</dt>
+                    <dd className="font-medium text-foreground truncate max-w-[140px]">{doc.subject}</dd>
+                  </div>
+                  {doc.topics && doc.topics.length > 0 && (
+                    <div className="py-1 border-b border-border/40">
+                      <dt className="text-muted-foreground mb-1">Topics</dt>
+                      <dd className="flex flex-wrap gap-1">
+                        {doc.topics.slice(0, 3).map((topic) => (
+                          <Badge key={topic} variant="secondary" className="px-1.5 py-0 text-[10px]">
+                            {topic}
+                          </Badge>
+                        ))}
+                      </dd>
+                    </div>
+                  )}
+                  <div className="flex justify-between py-1 border-b border-border/40">
+                    <dt className="text-muted-foreground">Pages</dt>
+                    <dd className="font-medium text-foreground">{doc.pages}</dd>
+                  </div>
+                  {doc.year && (
+                    <div className="flex justify-between py-1 border-b border-border/40">
+                      <dt className="text-muted-foreground">Year</dt>
+                      <dd className="font-medium text-foreground">{doc.year}</dd>
+                    </div>
+                  )}
+                  {doc.size && (
+                    <div className="flex justify-between py-1 border-b border-border/40">
+                      <dt className="text-muted-foreground">File size</dt>
+                      <dd className="font-medium text-foreground">{doc.size}</dd>
+                    </div>
+                  )}
+                  {doc.institution && doc.institution !== "Unknown" && (
+                    <div className="flex justify-between py-1 border-b border-border/40">
+                      <dt className="text-muted-foreground">Institution</dt>
+                      <dd className="font-medium text-foreground truncate max-w-[140px]">{doc.institution}</dd>
+                    </div>
+                  )}
+                  {doc.author && doc.author !== "Unknown" && (
+                    <div className="flex justify-between py-1 border-b border-border/40">
+                      <dt className="text-muted-foreground">Author</dt>
+                      <dd className="font-medium text-foreground truncate max-w-[140px]">{doc.author}</dd>
+                    </div>
+                  )}
+                  <div className="flex justify-between py-1">
+                    <dt className="text-muted-foreground">Views / Downloads</dt>
+                    <dd className="font-medium text-foreground">{doc.views ?? 0} / {doc.downloads ?? 0}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              {/* Compact Community Rating & Actions Card */}
+              <div className="rounded-xl border border-border bg-card p-4 shadow-soft">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-muted-foreground">Community Rating</span>
+                  <span className="text-xs font-medium text-foreground">
+                    {Number(doc.rating || 0).toFixed(1)} / 5 ({doc.ratingCount ?? 0})
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-center gap-1.5 py-1">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      type="button"
+                      onClick={() => rate(star)}
+                      className="p-1 transition hover:scale-110"
+                      title={`Rate ${star} stars`}
+                    >
+                      <Star
+                        className={`size-4 ${
+                          (doc.userRating ?? Math.round(doc.rating || 0)) >= star
+                            ? "fill-amber-400 text-amber-400"
+                            : "text-muted-foreground/40 hover:text-amber-400"
+                        }`}
+                      />
+                    </button>
+                  ))}
+                </div>
+
+                <div className="mt-3 flex items-center justify-between border-t border-border/40 pt-2 text-xs">
+                  <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={report}>
+                    <Flag className="mr-1 size-3 text-muted-foreground" /> Report
                   </Button>
-                )}
-                <div className="flex gap-2">
-                  <Button variant="outline" className="flex-1" onClick={toggleSave}>
-                    {doc.isSaved ? (
-                      <BookmarkCheck className="size-4" />
-                    ) : (
-                      <Bookmark className="size-4" />
-                    )}{" "}
-                    {doc.isSaved ? "Saved" : "Save"}
-                  </Button>
-                  <Button variant="outline" className="flex-1" onClick={share}>
-                    <Share2 className="size-4" /> Share
+                  <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" asChild>
+                    <Link to="/policies">Copyright policy</Link>
                   </Button>
                 </div>
-                {auth.data?.user && (
-                  <div className="rounded-lg border border-border bg-surface p-3">
-                    <label className="text-xs font-semibold text-muted-foreground">
-                      Add to collection
-                    </label>
-                    <div className="mt-2 flex gap-2">
-                      <select
-                        value={collectionId}
-                        onChange={(event) => setCollectionId(event.target.value)}
-                        className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs"
-                      >
-                        <option value="">Choose collection</option>
-                        {(collections.data?.collections ?? []).map((collection) => (
-                          <option key={collection.id} value={collection.id}>
-                            {collection.name}
-                          </option>
-                        ))}
-                      </select>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={addToCollection}
-                        aria-label="Add to collection"
-                      >
-                        <FolderPlus className="size-4" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                <div className="rounded-lg border border-border bg-surface p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <p className="text-xs font-semibold text-muted-foreground">
-                        Community rating
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        {Number(doc.rating || 0).toFixed(1)} from {doc.ratingCount ?? 0} ratings
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap justify-end gap-1">
-                      <Button variant="ghost" size="sm" onClick={report}>
-                        <Flag className="size-4" /> Report
-                      </Button>
-                      <Button asChild variant="ghost" size="sm">
-                        <Link to="/policies" search={{ document: doc.id }}>
-                          <Scale className="size-4" /> Copyright
-                        </Link>
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="mt-2 flex gap-1" aria-label="Rate this document">
-                    {[1, 2, 3, 4, 5].map((rating) => (
-                      <button
-                        key={rating}
-                        type="button"
-                        onClick={() => rate(rating)}
-                        className="rounded p-1 transition hover:bg-highlight/20"
-                        aria-label={`Rate ${rating} out of 5`}
-                      >
-                        <Star
-                          className={`size-5 ${rating <= Number(doc.userRating || 0) ? "fill-highlight text-highlight" : "text-muted-foreground"}`}
-                        />
-                      </button>
+              </div>
+
+              {/* Recommendations Section */}
+              {related && related.length > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-1">
+                    Related Documents
+                  </h3>
+                  <div className="space-y-2">
+                    {related.slice(0, 3).map((relDoc) => (
+                      <CompactDocumentCard key={relDoc.id} doc={relDoc} />
                     ))}
                   </div>
                 </div>
-              </div>
-
-              <dl className="mt-6 space-y-2 text-sm">
-                <Meta label="Document type" value={doc.docType} />
-                <Meta label="Course / subject" value={doc.subject} />
-                <Meta label="Topics" value={doc.topics.join(", ")} />
-                <Meta label="Level" value={doc.level} />
-                <Meta label="Year" value={String(doc.year)} />
-                <Meta label="Pages" value={String(doc.pages)} />
-                <Meta label="File size" value={doc.size} />
-                <Meta label="Institution" value={doc.institution ?? "Unknown"} />
-                {doc.libraryName && (
-                  <Meta
-                    label="Library access"
-                    value={`${doc.libraryName}${doc.visibility === "library" ? " · members only" : ""}`}
-                  />
-                )}
-                <Meta label="Author" value={doc.author ?? "Unknown"} />
-                {doc.sourceAttribution && (
-                  <Meta label="Source / licence" value={doc.sourceAttribution} />
-                )}
-                {doc.rightsBasis && doc.rightsBasis !== "unspecified" && (
-                  <Meta label="Sharing basis" value={doc.rightsBasis.replaceAll("_", " ")} />
-                )}
-                <Meta label="Views" value={(doc.views ?? 0).toLocaleString()} />
-                <Meta label="Downloads" value={doc.downloads.toLocaleString()} />
-              </dl>
-            </div>
-
-            <div className="mt-6">
-              <p className="mb-3 text-sm font-semibold">Because you viewed this</p>
-              <div className="space-y-3">
-                {detail.data.related.map((document) => (
-                  <CompactDocumentCard key={document.id} doc={document} />
-                ))}
-              </div>
-            </div>
-            <Link
-              to="/search"
-              search={{ q: doc.subject }}
-              className="mt-4 inline-block text-sm font-medium text-brand"
-            >
-              More {doc.subject} documents →
-            </Link>
-          </aside>
+              )}
+            </aside>
+          )}
         </div>
       </main>
+
       <SiteFooter />
-      <PromptModal modalState={promptModal} />
-    </div>
-  );
-}
 
-function HighlightedSnippet({ value }: { value: string }) {
-  const parts = value.split(/(<mark>|<\/mark>)/g);
-  let highlighted = false;
-  return parts.map((part, index) => {
-    if (part === "<mark>") {
-      highlighted = true;
-      return null;
-    }
-    if (part === "</mark>") {
-      highlighted = false;
-      return null;
-    }
-    return highlighted ? (
-      <mark key={index} className="rounded bg-highlight/35 px-0.5 text-foreground">
-        {part}
-      </mark>
-    ) : (
-      <span key={index}>{part}</span>
-    );
-  });
-}
+      <SaveToCollectionModal
+        documentId={doc.id}
+        documentTitle={doc.title}
+        open={saveModalOpen}
+        onOpenChange={setSaveModalOpen}
+      />
 
-function Meta({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-3 border-b border-border/60 pb-2">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="text-right font-medium">{value}</dd>
+      {promptModal && (
+        <PromptModal modalState={promptModal} />
+      )}
     </div>
   );
 }

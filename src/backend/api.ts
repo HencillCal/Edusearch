@@ -24,6 +24,11 @@ import {
   syncDocumentTopics,
 } from "./db";
 import {
+  generateDocumentThumbnail,
+  encryptJoinCode,
+  decryptJoinCode,
+} from "./thumbnails";
+import {
   assessReconstructionQuality,
   createSearchableScanPdf,
   createStructuredDocx,
@@ -198,8 +203,13 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   if (libraryMatch && method === "PATCH") return updateLibrary(request, libraryMatch[1]);
   if (libraryMatch && method === "DELETE") return deleteLibrary(request, libraryMatch[1]);
   const libraryCodeMatch = pathname.match(/^\/api\/libraries\/([^/]+)\/join-code$/);
+  if (libraryCodeMatch && method === "GET")
+    return getLibraryJoinCode(request, libraryCodeMatch[1]);
   if (libraryCodeMatch && method === "POST")
     return regenerateLibraryJoinCode(request, libraryCodeMatch[1]);
+  const libraryRotateMatch = pathname.match(/^\/api\/libraries\/([^/]+)\/rotate-code$/);
+  if (libraryRotateMatch && method === "POST")
+    return regenerateLibraryJoinCode(request, libraryRotateMatch[1]);
   const libraryDocsMatch = pathname.match(/^\/api\/libraries\/([^/]+)\/documents$/);
   if (libraryDocsMatch && method === "POST")
     return addLibraryDocument(request, libraryDocsMatch[1]);
@@ -228,10 +238,24 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   if (insideSearchMatch && method === "GET")
     return searchInsideDocument(request, insideSearchMatch[1], url);
 
+  const thumbnailMatch = pathname.match(/^\/api\/documents\/([^/]+)\/thumbnail$/);
+  if (thumbnailMatch && method === "GET")
+    return documentThumbnail(request, thumbnailMatch[1]);
+
+  const contentMatch = pathname.match(/^\/api\/documents\/([^/]+)\/content$/);
+  if (contentMatch && (method === "GET" || method === "HEAD"))
+    return downloadDocument(request, contentMatch[1], true);
+
+  const fileMatch = pathname.match(/^\/api\/documents\/([^/]+)\/file$/);
+  if (fileMatch && (method === "GET" || method === "HEAD"))
+    return downloadDocument(request, fileMatch[1], false);
+
   const downloadMatch = pathname.match(/^\/api\/documents\/([^/]+)\/download$/);
-  if (downloadMatch && method === "GET") return downloadDocument(request, downloadMatch[1], false);
+  if (downloadMatch && (method === "GET" || method === "HEAD"))
+    return downloadDocument(request, downloadMatch[1], false);
   const previewMatch = pathname.match(/^\/api\/documents\/([^/]+)\/preview$/);
-  if (previewMatch && method === "GET") return downloadDocument(request, previewMatch[1], true);
+  if (previewMatch && (method === "GET" || method === "HEAD"))
+    return downloadDocument(request, previewMatch[1], true);
   const docMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
   if (docMatch && method === "GET") return documentDetail(request, docMatch[1]);
 
@@ -1068,6 +1092,65 @@ function documentDetail(request: Request, id: string) {
   });
 }
 
+async function documentThumbnail(request: Request, id: string) {
+  const db = getDb();
+  const user = sessionFromRequest(request);
+  const access = documentAccess(user, "d");
+  const row = db
+    .prepare(`SELECT d.* FROM documents d WHERE d.id=? AND ${access.sql}`)
+    .get(id, ...access.params) as Record<string, unknown> | undefined;
+  if (!row) throw new HttpError(404, "Document not found or you do not have access.");
+
+  const thumbnailsDir = path.resolve(dataDir, "thumbnails");
+  const thumbnailFile = path.join(thumbnailsDir, `${id}.webp`);
+
+  if (!existsSync(thumbnailFile)) {
+    try {
+      await generateDocumentThumbnail({
+        id: String(row.id),
+        fileType: String(row.file_type || "PDF"),
+        storagePath: row.storage_path ? String(row.storage_path) : null,
+        title: String(row.title),
+        subject: String(row.subject),
+        docType: String(row.doc_type || "Notes"),
+        year: row.year ? Number(row.year) : 2026,
+        pages: row.pages ? Number(row.pages) : 1,
+        institution: row.institution ? String(row.institution) : null,
+        author: row.author ? String(row.author) : null,
+        extractedText: row.extracted_text ? String(row.extracted_text) : "",
+      });
+    } catch {
+      // Fallback
+    }
+  }
+
+  const bytes = await readFile(thumbnailFile).catch(() => Buffer.alloc(0));
+  if (!bytes.length) {
+    throw new HttpError(404, "Thumbnail not ready.");
+  }
+
+  const etag = `"${id}-${bytes.length}"`;
+  const ifNoneMatch = request.headers.get("if-none-match");
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        "etag": etag,
+        "cache-control": "public, max-age=86400",
+      },
+    });
+  }
+
+  return new Response(request.method.toUpperCase() === "HEAD" ? null : arrayBufferBody(bytes), {
+    headers: {
+      "content-type": "image/webp",
+      "content-length": String(bytes.length),
+      "cache-control": "public, max-age=86400",
+      "etag": etag,
+    },
+  });
+}
+
 async function downloadDocument(request: Request, id: string, preview: boolean) {
   const db = getDb();
   const user = sessionFromRequest(request);
@@ -1115,7 +1198,7 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
     contentType = contentTypeFromName(filename);
   }
 
-  if (!preview) {
+  if (!preview && request.method.toUpperCase() === "GET") {
     db.prepare("UPDATE documents SET downloads=downloads+1 WHERE id=?").run(id);
     db.prepare("INSERT INTO download_logs(document_id,user_id) VALUES(?,?)").run(
       id,
@@ -1123,12 +1206,61 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
     );
   }
 
-  return new Response(arrayBufferBody(bytes), {
+  const totalLength = bytes.length;
+  const etag = `"${createHash("md5").update(bytes).digest("hex")}"`;
+
+  const ifNoneMatch = request.headers.get("if-none-match");
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        "etag": etag,
+        "accept-ranges": "bytes",
+        "cache-control": preview ? "public, max-age=86400" : "private, no-store",
+      },
+    });
+  }
+
+  const rangeHeader = request.headers.get("range");
+  if (rangeHeader && rangeHeader.startsWith("bytes=") && request.method.toUpperCase() === "GET") {
+    const rangeSpec = rangeHeader.slice(6).trim();
+    const [startStr, endStr] = rangeSpec.split("-");
+    let start = parseInt(startStr, 10);
+    let end = endStr ? parseInt(endStr, 10) : totalLength - 1;
+
+    if (isNaN(start)) {
+      start = totalLength - parseInt(endStr, 10);
+      end = totalLength - 1;
+    }
+    if (isNaN(end) || end >= totalLength) {
+      end = totalLength - 1;
+    }
+
+    if (start <= end && start >= 0 && end < totalLength) {
+      const chunk = bytes.subarray(start, end + 1);
+      return new Response(arrayBufferBody(chunk), {
+        status: 206,
+        headers: {
+          "content-type": contentType,
+          "content-length": String(chunk.length),
+          "content-range": `bytes ${start}-${end}/${totalLength}`,
+          "accept-ranges": "bytes",
+          "etag": etag,
+          "content-disposition": `${preview ? "inline" : "attachment"}; filename="${filename.replace(/"/g, "")}"`,
+          "cache-control": preview ? "public, max-age=86400" : "private, no-store",
+        },
+      });
+    }
+  }
+
+  return new Response(request.method.toUpperCase() === "HEAD" ? null : arrayBufferBody(bytes), {
     headers: {
       "content-type": contentType,
-      "content-length": String(bytes.length),
+      "content-length": String(totalLength),
+      "accept-ranges": "bytes",
+      "etag": etag,
       "content-disposition": `${preview ? "inline" : "attachment"}; filename="${filename.replace(/"/g, "")}"`,
-      "cache-control": preview ? "private, max-age=300" : "private, no-store",
+      "cache-control": preview ? "public, max-age=86400" : "private, no-store",
     },
   });
 }
@@ -1490,6 +1622,13 @@ async function submitUpload(request: Request) {
     typeof body.libraryId === "string" && body.libraryId.trim() ? body.libraryId.trim() : null;
   const library = libraryId ? requireLibraryManager(libraryId, user) : null;
   const visibility = libraryId && body.visibility === "library" ? "library" : "public";
+  const existingBySha = getDb()
+    .prepare("SELECT id, title, status FROM documents WHERE sha256=? AND status<>'archived' LIMIT 1")
+    .get(String(staged.sha256)) as { id: string; title: string; status: string } | undefined;
+  if (existingBySha && existingBySha.id !== uploadId) {
+    throw new HttpError(409, `This exact document already exists in the repository as "${existingBySha.title}".`);
+  }
+
   const id = uniqueDocumentId(metadata.title);
   const storagePath = await moveToUploads(
     String(staged.staging_path),
@@ -1544,6 +1683,21 @@ async function submitUpload(request: Request) {
       .run(libraryId, id, user.id);
   }
   getDb().prepare("DELETE FROM staged_uploads WHERE id=?").run(uploadId);
+
+  generateDocumentThumbnail({
+    id,
+    fileType: String(staged.file_type),
+    storagePath,
+    title: metadata.title,
+    subject: metadata.subject,
+    docType: metadata.docType,
+    year: metadata.year,
+    pages: Number(staged.pages),
+    institution: metadata.institution || (library?.institution ? String(library.institution) : null),
+    author: metadata.author || null,
+    extractedText: String(staged.extracted_text || ""),
+  }).catch((err) => console.error("Thumbnail generation error:", err));
+
   if (status === "published") {
     refreshDocumentFts(id);
     notifyTopicFollowers(id, {
@@ -3390,11 +3544,12 @@ async function createLibrary(request: Request) {
   const id = randomUUID();
   const slug = uniqueLibrarySlug(name);
   const joinCode = generateUniqueJoinCode();
+  const encryptedJoinCode = encryptJoinCode(joinCode);
   const db = getDb();
   db.prepare(
     `
-    INSERT INTO libraries(id,name,slug,institution,description,visibility,owner_user_id,join_code_hash,join_code_hint)
-    VALUES(?,?,?,?,?,?,?,?,?)
+    INSERT INTO libraries(id,name,slug,institution,description,visibility,owner_user_id,join_code_hash,join_code_encrypted,join_code_hint)
+    VALUES(?,?,?,?,?,?,?,?,?,?)
   `,
   ).run(
     id,
@@ -3405,6 +3560,7 @@ async function createLibrary(request: Request) {
     visibility,
     user.id,
     hashJoinCode(joinCode),
+    encryptedJoinCode,
     joinCode.slice(-4),
   );
   db.prepare("INSERT INTO library_members(library_id,user_id,role) VALUES(?,?, 'owner')").run(
@@ -3558,15 +3714,33 @@ function deleteLibrary(request: Request, id: string) {
   return json({ deleted: true, archivedDocuments: privateDocuments.length });
 }
 
+function getLibraryJoinCode(request: Request, id: string) {
+  const user = requireUser(request);
+  const access = requireLibraryOwner(id, user);
+  const encrypted = String(access.library.join_code_encrypted || "");
+  let joinCode = encrypted ? decryptJoinCode(encrypted) : null;
+  if (!joinCode) {
+    joinCode = generateUniqueJoinCode();
+    const newEncrypted = encryptJoinCode(joinCode);
+    getDb()
+      .prepare(
+        "UPDATE libraries SET join_code_hash=?,join_code_encrypted=?,join_code_hint=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      )
+      .run(hashJoinCode(joinCode), newEncrypted, joinCode.slice(-4), id);
+  }
+  return json({ joinCode });
+}
+
 function regenerateLibraryJoinCode(request: Request, id: string) {
   const user = requireUser(request);
   requireLibraryOwner(id, user);
   const joinCode = generateUniqueJoinCode();
+  const encrypted = encryptJoinCode(joinCode);
   getDb()
     .prepare(
-      "UPDATE libraries SET join_code_hash=?,join_code_hint=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      "UPDATE libraries SET join_code_hash=?,join_code_encrypted=?,join_code_hint=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
     )
-    .run(hashJoinCode(joinCode), joinCode.slice(-4), id);
+    .run(hashJoinCode(joinCode), encrypted, joinCode.slice(-4), id);
   audit(user.id, "library.join_code.rotate", "library", id, {});
   return json({ joinCode });
 }
@@ -4731,6 +4905,8 @@ function mapDocument(row: unknown, user: SessionUser | null, includeContent = fa
         ? String(item.rights_restriction_note)
         : undefined,
     isSaved: saved,
+    thumbnailUrl: `/api/documents/${id}/thumbnail`,
+    thumbnailStatus: String(item.thumbnail_status || "ready"),
     ...(includeContent
       ? {
           content: String(item.extracted_text || ""),

@@ -26,6 +26,8 @@ export type ApiDocument = DocDoc & {
   rightsStatus?: "clear" | "claimed" | "restricted" | "removed";
   rightsRestrictionNote?: string;
   uploadedBy?: string;
+  thumbnailUrl?: string;
+  thumbnailStatus?: string;
 };
 
 export type ApiLibrary = {

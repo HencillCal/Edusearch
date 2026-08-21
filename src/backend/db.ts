@@ -538,6 +538,9 @@ export function initializeDatabase() {
   ensureColumn("ocr_jobs", "ocr_language", "TEXT NOT NULL DEFAULT 'eng'");
   ensureColumn("ocr_jobs", "ocr_quality_mode", "TEXT NOT NULL DEFAULT 'accurate'");
   ensureColumn("ocr_jobs", "pipeline_json", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn("documents", "thumbnail_path", "TEXT");
+  ensureColumn("documents", "thumbnail_status", "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn("libraries", "join_code_encrypted", "TEXT");
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_documents_visibility ON documents(visibility, library_id, status);",
   );

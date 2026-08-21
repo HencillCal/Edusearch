@@ -198,9 +198,13 @@ function SearchPage() {
                 </div>
               </div>
             ) : (
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {results.map((document) => (
-                  <DocumentCard key={document.id} doc={document} showSnippet />
+                  <DocumentCard
+                    key={document.id}
+                    doc={document}
+                    showSnippet={q.includes('"') || (q.trim().includes(" ") && q.trim().length > 18)}
+                  />
                 ))}
               </div>
             )}

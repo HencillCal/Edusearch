@@ -3,26 +3,35 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
   Building2,
+  Copy,
   FileText,
   Globe2,
   KeyRound,
   Library,
   Loader2,
   LockKeyhole,
-  Plus,
   Pencil,
+  Plus,
   RefreshCw,
   ShieldCheck,
+  Trash2,
   Upload,
   Users,
-  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
-import { CompactDocumentCard } from "@/components/document-card";
+import { DocumentCard } from "@/components/document-card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { apiFetch, type ApiDocument, type ApiLibrary } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import {
@@ -49,12 +58,15 @@ function LibrariesPage() {
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState("");
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [joinModalOpen, setJoinModalOpen] = useState(false);
+
+  // Form states
   const [name, setName] = useState("");
   const [institution, setInstitution] = useState("");
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<"public" | "private">("private");
-  const [joinCode, setJoinCode] = useState("");
-  const [newJoinCode, setNewJoinCode] = useState("");
+  const [joinCodeInput, setJoinCodeInput] = useState("");
   const [documentId, setDocumentId] = useState("");
   const [makePrivate, setMakePrivate] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -68,6 +80,7 @@ function LibrariesPage() {
     retry: false,
   });
   const libraries = useMemo(() => list.data?.libraries ?? [], [list.data?.libraries]);
+
   useEffect(() => {
     if (!selectedId && libraries.length) setSelectedId(libraries[0].id);
     if (selectedId && libraries.length && !libraries.some((item) => item.id === selectedId))
@@ -82,19 +95,32 @@ function LibrariesPage() {
     retry: false,
   });
 
+  // Fetch join code for owner/manager
+  const joinCodeQuery = useQuery({
+    queryKey: ["library-join-code", selectedId],
+    queryFn: () =>
+      apiFetch<{ joinCode: string }>(`/api/libraries/${encodeURIComponent(selectedId)}/join-code`),
+    enabled: Boolean(selectedId) && Boolean(detail.data?.canManage),
+    retry: false,
+  });
+
   const mine = useMemo(() => libraries.filter((item) => item.isMember), [libraries]);
   const publicLibraries = useMemo(() => libraries.filter((item) => !item.isMember), [libraries]);
 
   const refresh = async (id = selectedId) => {
     await queryClient.invalidateQueries({ queryKey: ["libraries"] });
-    if (id) await queryClient.invalidateQueries({ queryKey: ["library", id] });
+    if (id) {
+      await queryClient.invalidateQueries({ queryKey: ["library", id] });
+      await queryClient.invalidateQueries({ queryKey: ["library-join-code", id] });
+    }
   };
 
-  const createLibrary = async () => {
+  const handleCreateLibrary = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!name.trim()) return toast.error("Please enter a name for your institution library.");
     setBusy(true);
     try {
-      const result = await apiFetch<{ library: ApiLibrary }>("/api/libraries", {
+      const result = await apiFetch<{ library: ApiLibrary; joinCode?: string }>("/api/libraries", {
         method: "POST",
         body: JSON.stringify({
           name: name.trim(),
@@ -106,8 +132,9 @@ function LibrariesPage() {
       setName("");
       setInstitution("");
       setDescription("");
+      setCreateModalOpen(false);
       setSelectedId(result.library.id);
-      toast.success("Library created");
+      toast.success(`Library "${result.library.name}" created successfully!`);
       await refresh(result.library.id);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not create library");
@@ -116,17 +143,19 @@ function LibrariesPage() {
     }
   };
 
-  const joinByCode = async () => {
-    if (!joinCode.trim()) return toast.error("Please enter the join code provided by your library owner.");
+  const handleJoinByCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!joinCodeInput.trim()) return toast.error("Please enter the join code.");
     setBusy(true);
     try {
       const result = await apiFetch<{ libraryId: string }>("/api/libraries/join", {
         method: "POST",
-        body: JSON.stringify({ joinCode: joinCode.trim() }),
+        body: JSON.stringify({ joinCode: joinCodeInput.trim() }),
       });
-      setJoinCode("");
+      setJoinCodeInput("");
+      setJoinModalOpen(false);
       setSelectedId(result.libraryId);
-      toast.success("Library joined");
+      toast.success("Joined library successfully!");
       await refresh(result.libraryId);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not join library");
@@ -139,18 +168,17 @@ function LibrariesPage() {
     if (!selectedId) return;
     setConfirmModal({
       open: true,
-      title: "Generate New Join Code",
-      description: "Are you sure? The current code will stop working immediately.",
-      confirmLabel: "Generate Code",
+      title: "Rotate Join Code",
+      description: "Generating a new join code will invalidate the previous code immediately.",
+      confirmLabel: "Generate New Code",
       onConfirm: async () => {
         setConfirmModal(null);
         try {
           const result = await apiFetch<{ joinCode: string }>(
-            `/api/libraries/${encodeURIComponent(selectedId)}/join-code`,
+            `/api/libraries/${encodeURIComponent(selectedId)}/rotate-code`,
             { method: "POST" },
           );
-          setNewJoinCode(result.joinCode);
-          toast.success("A new join code was generated");
+          toast.success("New join code generated: " + result.joinCode);
           await refresh();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "Could not rotate join code");
@@ -160,13 +188,18 @@ function LibrariesPage() {
     });
   };
 
+  const copyJoinCode = (code: string) => {
+    navigator.clipboard.writeText(code);
+    toast.success("Join code copied to clipboard");
+  };
+
   const editLibrary = () => {
     const current = detail.data?.library;
     if (!current) return;
     setPromptModal({
       open: true,
       title: "Edit Library Details",
-      description: "Update the institution library name, institution context, and description.",
+      description: "Update library information.",
       fields: [
         { name: "name", label: "Library Name", defaultValue: current.name, required: true },
         { name: "institution", label: "Institution (optional)", defaultValue: current.institution || "" },
@@ -185,7 +218,7 @@ function LibrariesPage() {
               description: values.description?.trim() || "",
             }),
           });
-          toast.success("Library details updated");
+          toast.success("Library updated");
           await refresh();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "Could not update library");
@@ -207,15 +240,9 @@ function LibrariesPage() {
       onConfirm: async () => {
         setConfirmModal(null);
         try {
-          const result = await apiFetch<{ deleted: boolean; archivedDocuments: number }>(
-            `/api/libraries/${encodeURIComponent(current.id)}`,
-            { method: "DELETE" },
-          );
+          await apiFetch(`/api/libraries/${encodeURIComponent(current.id)}`, { method: "DELETE" });
           setSelectedId("");
-          setNewJoinCode("");
-          toast.success(
-            `Library deleted${result.archivedDocuments ? `; ${result.archivedDocuments} private document(s) archived` : ""}`,
-          );
+          toast.success("Library deleted");
           await refresh("");
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "Could not delete library");
@@ -235,9 +262,7 @@ function LibrariesPage() {
           visibility: current.visibility === "private" ? "public" : "private",
         }),
       });
-      toast.success(
-        current.visibility === "private" ? "Library is now public" : "Library is now private",
-      );
+      toast.success(current.visibility === "private" ? "Library is now public" : "Library is now private");
       await refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update library");
@@ -245,7 +270,7 @@ function LibrariesPage() {
   };
 
   const addDocument = async () => {
-    if (!documentId.trim()) return toast.error("Please enter or paste a valid Document ID to add it to this library.");
+    if (!documentId.trim()) return toast.error("Please enter a valid Document ID.");
     if (!selectedId) return toast.error("Please select a library first.");
     try {
       await apiFetch(`/api/libraries/${encodeURIComponent(selectedId)}/documents`, {
@@ -253,7 +278,7 @@ function LibrariesPage() {
         body: JSON.stringify({ documentId: documentId.trim(), makePrivate }),
       });
       setDocumentId("");
-      toast.success("Document added to the library");
+      toast.success("Document added to library");
       await refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not add document");
@@ -270,10 +295,10 @@ function LibrariesPage() {
           body: JSON.stringify({ role }),
         },
       );
-      toast.success(`Member role changed to ${role}`);
+      toast.success(`Role updated to ${role}`);
       await refresh();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update member role");
+      toast.error(error instanceof Error ? error.message : "Could not update member");
     }
   };
 
@@ -282,9 +307,9 @@ function LibrariesPage() {
     setConfirmModal({
       open: true,
       title: "Remove Member",
-      description: "Are you sure you want to remove this member from the library?",
+      description: "Remove this user from the library?",
       destructive: true,
-      confirmLabel: "Remove Member",
+      confirmLabel: "Remove",
       onConfirm: async () => {
         setConfirmModal(null);
         try {
@@ -307,9 +332,9 @@ function LibrariesPage() {
     setConfirmModal({
       open: true,
       title: "Remove Document",
-      description: "Are you sure you want to remove this document from the library?",
+      description: "Remove this document from the library?",
       destructive: true,
-      confirmLabel: "Remove Document",
+      confirmLabel: "Remove",
       onConfirm: async () => {
         setConfirmModal(null);
         try {
@@ -317,7 +342,7 @@ function LibrariesPage() {
             method: "DELETE",
             body: JSON.stringify({ documentId: id }),
           });
-          toast.success("Document removed from the library");
+          toast.success("Document removed");
           await refresh();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "Could not remove document");
@@ -328,457 +353,462 @@ function LibrariesPage() {
   };
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen flex flex-col bg-background">
       <SiteHeader />
-      <main className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+
+      <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 flex-1 flex flex-col">
+        {/* Compact Header with Direct Action Modals */}
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-6">
           <div>
-            <h1 className="flex items-center gap-2 text-3xl">
-              <Library className="size-7 text-brand" /> Institution libraries
+            <h1 className="flex items-center gap-2 text-2xl sm:text-3xl font-display font-semibold text-foreground">
+              <Library className="size-6 text-brand" /> Institution Libraries
             </h1>
-            <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-              Create public course libraries or private spaces for a university, college,
-              department, class or study group. Private documents remain hidden from non-members.
+            <p className="mt-1 text-sm text-muted-foreground">
+              Manage shared academic spaces, departments, and course materials.
             </p>
           </div>
-          <Button asChild variant="outline">
-            <Link to="/upload">
-              <Upload className="size-4" /> Upload document
-            </Link>
-          </Button>
+
+          <div className="flex items-center gap-2.5">
+            {auth.data?.user && (
+              <>
+                <Button size="sm" onClick={() => setCreateModalOpen(true)} className="h-9 px-3 text-xs">
+                  <Plus className="mr-1.5 size-3.5" /> Create Library
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setJoinModalOpen(true)} className="h-9 px-3 text-xs">
+                  <KeyRound className="mr-1.5 size-3.5" /> Join Library
+                </Button>
+              </>
+            )}
+            <Button asChild variant="ghost" size="sm" className="h-9 px-3 text-xs">
+              <Link to="/upload">
+                <Upload className="mr-1.5 size-3.5" /> Upload Document
+              </Link>
+            </Button>
+          </div>
         </div>
 
         {!auth.isLoading && !auth.data?.user && (
-          <div className="mt-6 rounded-xl border border-highlight/50 bg-highlight/10 p-4 text-sm">
-            Public libraries can be viewed without an account.{" "}
-            <Link to="/login" className="font-semibold text-brand">
-              Log in
-            </Link>{" "}
-            to create or join a private library.
+          <div className="mt-4 rounded-xl border border-border bg-card p-4 text-xs text-muted-foreground flex items-center justify-between">
+            <span>Public libraries are accessible to everyone. Log in to create or join private workspaces.</span>
+            <Button size="sm" variant="outline" asChild className="h-7 text-xs">
+              <Link to="/login">Log in</Link>
+            </Button>
           </div>
         )}
 
-        {auth.data?.user && (
-          <section className="mt-8 grid gap-5 lg:grid-cols-2">
-            <div className="rounded-xl border border-border bg-card p-5 shadow-soft">
-              <h2 className="flex items-center gap-2 text-xl">
-                <Plus className="size-5 text-brand" /> Create a library
-              </h2>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <Field
-                  label="Library name"
-                  value={name}
-                  onChange={setName}
-                  placeholder="Computer Science Department"
-                />
-                <Field
-                  label="Institution"
-                  value={institution}
-                  onChange={setInstitution}
-                  placeholder="Optional institution name"
-                />
-                <label className="sm:col-span-2 block">
-                  <span className="mb-1.5 block text-sm font-medium">Description</span>
-                  <textarea
-                    value={description}
-                    onChange={(event) => setDescription(event.target.value)}
-                    rows={3}
-                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-brand"
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-1.5 block text-sm font-medium">Visibility</span>
-                  <select
-                    value={visibility}
-                    onChange={(event) => setVisibility(event.target.value as "public" | "private")}
-                    className="h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm"
-                  >
-                    <option value="private">Private — members only</option>
-                    <option value="public">Public — anyone can view</option>
-                  </select>
-                </label>
-                <div className="flex items-end">
-                  <Button className="w-full" disabled={busy} onClick={createLibrary}>
-                    {busy && <Loader2 className="size-4 animate-spin" />} Create library
-                  </Button>
-                </div>
+        {/* 2-Column Responsive Layout */}
+        <div className="mt-6 grid gap-6 lg:grid-cols-[300px_1fr] flex-1">
+          {/* Left Sidebar Library Selector */}
+          <aside className="space-y-5">
+            <section className="rounded-xl border border-border bg-card p-4 shadow-soft">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="font-display text-sm font-semibold text-foreground">My Libraries</h2>
+                <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                  {mine.length}
+                </Badge>
               </div>
-              {newJoinCode && (
-                <div className="mt-4 rounded-lg border border-brand/30 bg-brand-soft p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-brand">
-                    Save this join code now
+              <div className="space-y-1.5">
+                {mine.length ? (
+                  mine.map((lib) => (
+                    <button
+                      key={lib.id}
+                      type="button"
+                      onClick={() => setSelectedId(lib.id)}
+                      className={`w-full rounded-lg border p-2.5 text-left transition ${
+                        selectedId === lib.id
+                          ? "border-brand bg-brand-soft/80 font-medium text-brand"
+                          : "border-border bg-surface hover:border-brand/40 text-foreground"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="truncate text-xs font-semibold">{lib.name}</span>
+                        {lib.visibility === "private" ? (
+                          <LockKeyhole className="size-3 text-muted-foreground shrink-0" />
+                        ) : (
+                          <Globe2 className="size-3 text-muted-foreground shrink-0" />
+                        )}
+                      </div>
+                      <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                        {lib.institution || "Academic Library"}
+                      </p>
+                      <p className="mt-1 text-[10px] text-muted-foreground">
+                        {lib.documentCount} docs · {lib.memberCount} members
+                      </p>
+                    </button>
+                  ))
+                ) : (
+                  <p className="py-4 text-center text-xs text-muted-foreground border border-dashed rounded-lg">
+                    No private libraries joined yet.
                   </p>
-                  <p className="mt-2 break-all font-mono text-lg font-semibold">{newJoinCode}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Only a hash is stored. Rotating the code invalidates the previous one.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-border bg-card p-5 shadow-soft">
-              <h2 className="flex items-center gap-2 text-xl">
-                <KeyRound className="size-5 text-brand" /> Join a private library
-              </h2>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Ask the library owner for its current join code.
-              </p>
-              <div className="mt-5 flex gap-2">
-                <input
-                  value={joinCode}
-                  onChange={(event) => setJoinCode(event.target.value)}
-                  placeholder="EDU-XXXXXXXX"
-                  className="h-10 min-w-0 flex-1 rounded-lg border border-border bg-surface px-3 font-mono text-sm outline-none focus:border-brand"
-                />
-                <Button disabled={busy} onClick={joinByCode}>
-                  Join
-                </Button>
+                )}
               </div>
-            </div>
-          </section>
-        )}
+            </section>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-[330px_1fr]">
-          <aside className="space-y-6">
-            <LibraryList
-              title="My libraries"
-              items={mine}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              empty="You have not joined a library yet."
-            />
-            <LibraryList
-              title="Public libraries"
-              items={publicLibraries}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              empty="No public libraries are available yet."
-            />
+            <section className="rounded-xl border border-border bg-card p-4 shadow-soft">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="font-display text-sm font-semibold text-foreground">Public Spaces</h2>
+                <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                  {publicLibraries.length}
+                </Badge>
+              </div>
+              <div className="space-y-1.5">
+                {publicLibraries.length ? (
+                  publicLibraries.map((lib) => (
+                    <button
+                      key={lib.id}
+                      type="button"
+                      onClick={() => setSelectedId(lib.id)}
+                      className={`w-full rounded-lg border p-2.5 text-left transition ${
+                        selectedId === lib.id
+                          ? "border-brand bg-brand-soft/80 font-medium text-brand"
+                          : "border-border bg-surface hover:border-brand/40 text-foreground"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="truncate text-xs font-semibold">{lib.name}</span>
+                        <Globe2 className="size-3 text-muted-foreground shrink-0" />
+                      </div>
+                      <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                        {lib.institution || "Academic Library"}
+                      </p>
+                      <p className="mt-1 text-[10px] text-muted-foreground">
+                        {lib.documentCount} docs
+                      </p>
+                    </button>
+                  ))
+                ) : (
+                  <p className="py-4 text-center text-xs text-muted-foreground border border-dashed rounded-lg">
+                    No other public libraries available.
+                  </p>
+                )}
+              </div>
+            </section>
           </aside>
 
-          <section className="min-h-[420px] rounded-xl border border-border bg-card p-5 shadow-soft">
+          {/* Right Main Library Detail & Documents Pane */}
+          <section className="flex flex-col rounded-xl border border-border bg-card p-5 shadow-soft">
             {!selectedId ? (
-              <div className="grid min-h-[360px] place-items-center text-center">
+              <div className="grid flex-1 place-items-center text-center py-16">
                 <div>
-                  <Building2 className="mx-auto size-9 text-muted-foreground" />
+                  <Building2 className="mx-auto size-10 text-muted-foreground/50" />
                   <p className="mt-3 text-sm text-muted-foreground">
-                    Create or join a library to manage its documents.
+                    Select a library on the left or create a new space.
                   </p>
                 </div>
               </div>
             ) : detail.isLoading ? (
-              <div className="grid min-h-[360px] place-items-center">
-                <Loader2 className="size-7 animate-spin text-brand" />
+              <div className="grid flex-1 place-items-center py-16">
+                <Loader2 className="size-8 animate-spin text-brand" />
               </div>
             ) : detail.isError || !detail.data ? (
-              <div className="grid min-h-[360px] place-items-center text-center">
+              <div className="grid flex-1 place-items-center text-center py-16">
                 <div>
                   <LockKeyhole className="mx-auto size-8 text-muted-foreground" />
                   <p className="mt-3 text-sm text-muted-foreground">
-                    {detail.error?.message || "This library is unavailable."}
+                    {detail.error?.message || "This library is private or unavailable."}
                   </p>
                 </div>
               </div>
             ) : (
-              <LibraryDetail
-                data={detail.data}
-                documentId={documentId}
-                setDocumentId={setDocumentId}
-                makePrivate={makePrivate}
-                setMakePrivate={setMakePrivate}
-                onAddDocument={addDocument}
-                onRemoveDocument={removeDocument}
-                onUpdateMember={updateMember}
-                onRemoveMember={removeMember}
-                onRotateCode={rotateCode}
-                onToggleVisibility={toggleVisibility}
-                onEdit={editLibrary}
-                onDelete={deleteLibrary}
-              />
+              <div className="space-y-6">
+                {/* Library Header info */}
+                <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-xl font-display font-semibold text-foreground">
+                        {detail.data.library.name}
+                      </h2>
+                      <Badge variant={detail.data.library.visibility === "private" ? "outline" : "secondary"}>
+                        {detail.data.library.visibility}
+                      </Badge>
+                      {detail.data.library.role && (
+                        <Badge variant="outline" className="border-brand/40 text-brand">
+                          {detail.data.library.role}
+                        </Badge>
+                      )}
+                    </div>
+                    {detail.data.library.institution && (
+                      <p className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground">
+                        <Building2 className="size-3.5" /> {detail.data.library.institution}
+                      </p>
+                    )}
+                    {detail.data.library.description && (
+                      <p className="mt-2 text-xs text-muted-foreground max-w-2xl">
+                        {detail.data.library.description}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Owner Permanent Join Code & Controls */}
+                  {detail.data.canManage && (
+                    <div className="flex flex-col items-end gap-2">
+                      {detail.data.library.visibility === "private" && (
+                        <div className="flex items-center gap-1.5 rounded-lg border border-brand/40 bg-brand-soft/60 px-3 py-1.5 text-xs">
+                          <span className="text-muted-foreground font-medium">Join code:</span>
+                          <code className="font-mono font-bold text-brand">
+                            {joinCodeQuery.data?.joinCode || "••••••••"}
+                          </code>
+                          {joinCodeQuery.data?.joinCode && (
+                            <button
+                              type="button"
+                              onClick={() => copyJoinCode(joinCodeQuery.data.joinCode)}
+                              className="p-1 text-muted-foreground hover:text-brand transition"
+                              title="Copy join code"
+                            >
+                              <Copy className="size-3.5" />
+                            </button>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-1.5 text-[11px] text-brand hover:text-brand"
+                            onClick={rotateCode}
+                          >
+                            <RefreshCw className="mr-1 size-3" /> Rotate
+                          </Button>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={editLibrary}>
+                          <Pencil className="mr-1 size-3" /> Edit
+                        </Button>
+                        <Button size="sm" variant="outline" className="h-7 text-xs" onClick={toggleVisibility}>
+                          {detail.data.library.visibility === "private" ? (
+                            <Globe2 className="mr-1 size-3" />
+                          ) : (
+                            <LockKeyhole className="mr-1 size-3" />
+                          )}
+                          Make {detail.data.library.visibility === "private" ? "Public" : "Private"}
+                        </Button>
+                        <Button size="sm" variant="destructive" className="h-7 text-xs" onClick={deleteLibrary}>
+                          <Trash2 className="mr-1 size-3" /> Delete
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Add Document to Library Input for Managers */}
+                {detail.data.canManage && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/80 bg-surface p-3">
+                    <input
+                      value={documentId}
+                      onChange={(e) => setDocumentId(e.target.value)}
+                      placeholder="Add document by ID (e.g. comp201-notes)"
+                      className="h-8 flex-1 min-w-[200px] rounded-md border border-border bg-background px-2.5 text-xs outline-none focus:border-brand"
+                    />
+                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={makePrivate}
+                        onChange={(e) => setMakePrivate(e.target.checked)}
+                        className="rounded"
+                      />
+                      Members only
+                    </label>
+                    <Button size="sm" onClick={addDocument} className="h-8 px-3 text-xs">
+                      <Plus className="mr-1 size-3.5" /> Add Document
+                    </Button>
+                  </div>
+                )}
+
+                {/* Library Documents Grid (3 Columns) */}
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                      Library Documents ({detail.data.documents.length})
+                    </h3>
+                  </div>
+
+                  {detail.data.documents.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-border p-8 text-center">
+                      <FileText className="mx-auto size-8 text-muted-foreground/40" />
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        No documents have been added to this library yet.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                      {detail.data.documents.map((doc) => (
+                        <div key={doc.id} className="relative group">
+                          <DocumentCard doc={doc} />
+                          {detail.data.canManage && (
+                            <button
+                              type="button"
+                              onClick={() => removeDocument(doc.id)}
+                              className="absolute top-2 right-10 grid size-7 place-items-center rounded-full bg-background/90 text-destructive opacity-0 group-hover:opacity-100 shadow-sm transition hover:scale-110"
+                              title="Remove from library"
+                            >
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Library Members Section */}
+                {detail.data.canManage && (
+                  <div className="border-t border-border pt-5">
+                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                      Members ({detail.data.members.length})
+                    </h3>
+                    <div className="divide-y divide-border/60 rounded-xl border border-border bg-surface/50">
+                      {detail.data.members.map((m) => (
+                        <div key={m.id} className="flex items-center justify-between p-3 text-xs">
+                          <div>
+                            <span className="font-semibold text-foreground">{m.name}</span>
+                            <span className="text-muted-foreground ml-2">({m.email})</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant={m.role === "owner" ? "default" : "outline"} className="text-[10px]">
+                              {m.role}
+                            </Badge>
+                            {m.role !== "owner" && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 px-1.5 text-[11px]"
+                                  onClick={() => updateMember(m.id, m.role === "editor" ? "viewer" : "editor")}
+                                >
+                                  Make {m.role === "editor" ? "Viewer" : "Editor"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 px-1.5 text-[11px] text-destructive hover:text-destructive"
+                                  onClick={() => removeMember(m.id)}
+                                >
+                                  Remove
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </section>
         </div>
       </main>
+
       <SiteFooter />
+
+      {/* Create Library Modal */}
+      <Dialog open={createModalOpen} onOpenChange={setCreateModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <form onSubmit={handleCreateLibrary}>
+            <DialogHeader>
+              <DialogTitle className="text-lg font-semibold flex items-center gap-2">
+                <Plus className="size-5 text-brand" /> Create Institution Library
+              </DialogTitle>
+              <DialogDescription className="text-xs text-muted-foreground">
+                Set up a private or public academic repository space.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="mt-3 space-y-3">
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Library Name</label>
+                <input
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Computer Science Department"
+                  className="h-9 w-full rounded-md border border-border bg-surface px-3 text-xs outline-none focus:border-brand"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Institution (Optional)</label>
+                <input
+                  value={institution}
+                  onChange={(e) => setInstitution(e.target.value)}
+                  placeholder="e.g. University of Nairobi"
+                  className="h-9 w-full rounded-md border border-border bg-surface px-3 text-xs outline-none focus:border-brand"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Description</label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={2}
+                  placeholder="Brief summary of this library's purpose"
+                  className="w-full rounded-md border border-border bg-surface px-3 py-1.5 text-xs outline-none focus:border-brand"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground mb-1 block">Visibility</label>
+                <select
+                  value={visibility}
+                  onChange={(e) => setVisibility(e.target.value as "public" | "private")}
+                  className="h-9 w-full rounded-md border border-border bg-surface px-2.5 text-xs"
+                >
+                  <option value="private">Private — Join code required</option>
+                  <option value="public">Public — Visible to everyone</option>
+                </select>
+              </div>
+            </div>
+
+            <DialogFooter className="mt-4 sm:justify-end gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setCreateModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" disabled={busy || !name.trim()}>
+                {busy && <Loader2 className="mr-1.5 size-3.5 animate-spin" />} Create Library
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Join Library Modal */}
+      <Dialog open={joinModalOpen} onOpenChange={setJoinModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <form onSubmit={handleJoinByCode}>
+            <DialogHeader>
+              <DialogTitle className="text-lg font-semibold flex items-center gap-2">
+                <KeyRound className="size-5 text-brand" /> Join Private Library
+              </DialogTitle>
+              <DialogDescription className="text-xs text-muted-foreground">
+                Enter the join code given to you by the library creator.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="mt-3">
+              <label className="text-xs font-medium text-muted-foreground mb-1 block">Join Code</label>
+              <input
+                required
+                value={joinCodeInput}
+                onChange={(e) => setJoinCodeInput(e.target.value)}
+                placeholder="EDU-XXXXXXXX"
+                className="h-10 w-full rounded-md border border-border bg-surface px-3 font-mono text-sm outline-none focus:border-brand uppercase tracking-wider"
+              />
+            </div>
+
+            <DialogFooter className="mt-4 sm:justify-end gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setJoinModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" disabled={busy || !joinCodeInput.trim()}>
+                {busy && <Loader2 className="mr-1.5 size-3.5 animate-spin" />} Join
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <PromptModal modalState={promptModal} />
       <ConfirmModal modalState={confirmModal} />
     </div>
-  );
-}
-
-function LibraryList({
-  title,
-  items,
-  selectedId,
-  onSelect,
-  empty,
-}: {
-  title: string;
-  items: ApiLibrary[];
-  selectedId: string;
-  onSelect: (id: string) => void;
-  empty: string;
-}) {
-  return (
-    <section className="rounded-xl border border-border bg-card p-4 shadow-soft">
-      <div className="flex items-center justify-between">
-        <h2 className="font-display text-lg font-semibold">{title}</h2>
-        <Badge variant="secondary">{items.length}</Badge>
-      </div>
-      <div className="mt-3 space-y-2">
-        {items.length ? (
-          items.map((library) => (
-            <button
-              key={library.id}
-              type="button"
-              onClick={() => onSelect(library.id)}
-              className={`w-full rounded-lg border p-3 text-left transition ${selectedId === library.id ? "border-brand bg-brand-soft" : "border-border bg-surface hover:border-brand/60"}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <p className="truncate font-semibold">{library.name}</p>
-                {library.visibility === "private" ? (
-                  <LockKeyhole className="size-4 text-muted-foreground" />
-                ) : (
-                  <Globe2 className="size-4 text-muted-foreground" />
-                )}
-              </div>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {library.institution || "Independent library"}
-              </p>
-              <p className="mt-2 text-xs text-muted-foreground">
-                {library.documentCount} documents · {library.memberCount} members
-              </p>
-            </button>
-          ))
-        ) : (
-          <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
-            {empty}
-          </p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function LibraryDetail({
-  data,
-  documentId,
-  setDocumentId,
-  makePrivate,
-  setMakePrivate,
-  onAddDocument,
-  onRemoveDocument,
-  onUpdateMember,
-  onRemoveMember,
-  onRotateCode,
-  onToggleVisibility,
-  onEdit,
-  onDelete,
-}: {
-  data: LibraryDetailResponse;
-  documentId: string;
-  setDocumentId: (value: string) => void;
-  makePrivate: boolean;
-  setMakePrivate: (value: boolean) => void;
-  onAddDocument: () => void;
-  onRemoveDocument: (id: string) => void;
-  onUpdateMember: (id: string, role: "editor" | "viewer") => void;
-  onRemoveMember: (id: string) => void;
-  onRotateCode: () => void;
-  onToggleVisibility: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const { library, documents, members, canManage } = data;
-  return (
-    <>
-      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-2xl">{library.name}</h2>
-            <Badge variant={library.visibility === "private" ? "outline" : "secondary"}>
-              {library.visibility}
-            </Badge>
-            {library.role && <Badge variant="outline">{library.role}</Badge>}
-          </div>
-          <p className="mt-2 flex items-center gap-1.5 text-sm text-muted-foreground">
-            <Building2 className="size-4" /> {library.institution || "Independent academic library"}
-          </p>
-          {library.description && (
-            <p className="mt-3 max-w-3xl text-sm text-muted-foreground">{library.description}</p>
-          )}
-        </div>
-        <div className="flex gap-3 text-sm text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <FileText className="size-4" /> {library.documentCount}
-          </span>
-          <span className="flex items-center gap-1">
-            <Users className="size-4" /> {library.memberCount}
-          </span>
-        </div>
-      </div>
-
-      {canManage && (
-        <div className="mt-5 rounded-xl border border-border bg-surface p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="flex items-center gap-2 font-semibold">
-                <ShieldCheck className="size-4 text-brand" /> Library controls
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Join-code hint: ••••{library.joinCodeHint || "none"}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={onEdit}>
-                <Pencil className="size-4" /> Edit details
-              </Button>
-              <Button size="sm" variant="outline" onClick={onRotateCode}>
-                <RefreshCw className="size-4" /> New join code
-              </Button>
-              <Button size="sm" variant="outline" onClick={onToggleVisibility}>
-                {library.visibility === "private" ? (
-                  <Globe2 className="size-4" />
-                ) : (
-                  <LockKeyhole className="size-4" />
-                )}{" "}
-                Make {library.visibility === "private" ? "public" : "private"}
-              </Button>
-              <Button size="sm" variant="destructive" onClick={onDelete}>
-                <Trash2 className="size-4" /> Delete
-              </Button>
-            </div>
-          </div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
-            <input
-              value={documentId}
-              onChange={(event) => setDocumentId(event.target.value)}
-              placeholder="Existing document ID"
-              className="h-10 rounded-lg border border-border bg-background px-3 text-sm outline-none focus:border-brand"
-            />
-            <Button onClick={onAddDocument}>
-              <Plus className="size-4" /> Add document
-            </Button>
-          </div>
-          <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={makePrivate}
-              onChange={(event) => setMakePrivate(event.target.checked)}
-            />{" "}
-            Restrict this document to library members
-          </label>
-        </div>
-      )}
-
-      <section className="mt-7">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xl">Documents</h3>
-          {canManage && (
-            <Button asChild size="sm">
-              <Link to="/upload">
-                <Upload className="size-4" /> Upload into a library
-              </Link>
-            </Button>
-          )}
-        </div>
-        {documents.length ? (
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {documents.map((document) => (
-              <div key={document.id} className="relative">
-                <CompactDocumentCard doc={document} />
-                {canManage && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="mt-2 w-full"
-                    onClick={() => onRemoveDocument(document.id)}
-                  >
-                    Remove from library
-                  </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-4 rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-            No documents have been added to this library.
-          </p>
-        )}
-      </section>
-
-      {canManage && members.length > 0 && (
-        <section className="mt-8">
-          <h3 className="text-xl">Members</h3>
-          <div className="mt-3 divide-y divide-border rounded-xl border border-border">
-            {members.map((member) => {
-              const canManageMembers = library.role === "owner" || library.role === "admin";
-              return (
-                <div
-                  key={member.id}
-                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm"
-                >
-                  <div>
-                    <p className="font-medium">{member.name}</p>
-                    <p className="text-xs text-muted-foreground">{member.email}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline">{member.role}</Badge>
-                    {canManageMembers && member.role !== "owner" && (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() =>
-                            onUpdateMember(
-                              member.id,
-                              member.role === "editor" ? "viewer" : "editor",
-                            )
-                          }
-                        >
-                          {member.role === "editor" ? "Make viewer" : "Make editor"}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={() => onRemoveMember(member.id)}
-                        >
-                          Remove
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-    </>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1.5 block text-sm font-medium">{label}</span>
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        className="h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm outline-none focus:border-brand"
-      />
-    </label>
   );
 }

@@ -332,80 +332,39 @@ function MyLibraryPage() {
                   </div>
                 )}
 
-                {/* Document uploads */}
-                {(uploadFilter === "all" || uploadFilter === "documents") && (
-                  <div className="mt-6">
-                    {uploadFilter === "all" && userOcrJobs.length > 0 && (
-                      <h3 className="mb-3 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-                        Submitted & Published Documents
-                      </h3>
-                    )}
-                    {userDocuments.length ? (
-                      <div className="space-y-3">
-                        {userDocuments.map((doc) => (
-                          <article
-                            key={doc.id}
-                            className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-card p-4 shadow-soft transition hover:border-brand/40"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-display text-base font-semibold">
-                                  {doc.title}
-                                </span>
-                                <Badge
-                                  variant={
-                                    doc.status === "published"
-                                      ? "secondary"
-                                      : doc.status === "awaiting_review"
-                                        ? "outline"
-                                        : doc.status === "rejected"
-                                          ? "destructive"
-                                          : "outline"
-                                  }
-                                >
-                                  {doc.status === "awaiting_review"
-                                    ? "Awaiting review"
-                                    : doc.status === "changes_requested"
-                                      ? "Changes requested"
-                                      : doc.status?.replaceAll("_", " ")}
-                                </Badge>
+                    {/* Document uploads */}
+                    {(uploadFilter === "all" || uploadFilter === "documents") && (
+                      <div className="mt-6">
+                        {uploadFilter === "all" && userOcrJobs.length > 0 && (
+                          <h3 className="mb-3 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+                            Submitted & Published Documents
+                          </h3>
+                        )}
+                        {userDocuments.length ? (
+                          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                            {userDocuments.map((doc) => (
+                              <div key={doc.id} className="relative flex flex-col justify-between">
+                                <DocumentCard doc={doc} />
+                                {doc.rejectionReason && (
+                                  <div className="mt-1.5 rounded-md bg-destructive/10 border border-destructive/20 px-2.5 py-1 text-[11px] text-destructive">
+                                    <span className="font-semibold">Feedback: </span>
+                                    {doc.rejectionReason}
+                                  </div>
+                                )}
                               </div>
-                              <p className="mt-1 text-xs text-muted-foreground">
-                                {doc.subject} · {doc.docType} · {doc.fileType} · {doc.pages} pages
-                              </p>
-                              {doc.rejectionReason && (
-                                <p className="mt-2 rounded-md bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
-                                  Feedback: {doc.rejectionReason}
-                                </p>
-                              )}
-                            </div>
-                            <div className="flex gap-2">
-                              {doc.status === "published" ? (
-                                <Button asChild size="sm">
-                                  <Link to="/document/$id" params={{ id: doc.id }}>
-                                    <FileText className="mr-1.5 size-3.5" /> View document
-                                  </Link>
-                                </Button>
-                              ) : (
-                                <Badge variant="outline" className="text-xs text-muted-foreground">
-                                  In moderation queue
-                                </Badge>
-                              )}
-                            </div>
-                          </article>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground">
-                        <FileClock className="mx-auto size-7 text-muted-foreground/60" />
-                        <p className="mt-2 font-medium">No document contributions yet</p>
-                        <Button asChild size="sm" className="mt-3">
-                          <Link to="/upload">Upload your first document</Link>
-                        </Button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground">
+                            <FileClock className="mx-auto size-7 text-muted-foreground/60" />
+                            <p className="mt-2 font-medium">No document contributions yet</p>
+                            <Button asChild size="sm" className="mt-3">
+                              <Link to="/upload">Upload your first document</Link>
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     )}
-                  </div>
-                )}
               </section>
             )}
 
