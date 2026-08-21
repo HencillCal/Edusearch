@@ -341,6 +341,22 @@ export type OcrRevision = {
   stats: OcrStructure["stats"];
 };
 
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  requestId?: string;
+  retryable?: boolean;
+
+  constructor(message: string, status: number, options: { code?: string; requestId?: string; retryable?: boolean } = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = options.code;
+    this.requestId = options.requestId;
+    this.retryable = options.retryable;
+  }
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has("content-type")) {
@@ -349,13 +365,42 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
+    let code: string | undefined;
+    let requestId: string | undefined;
+    let retryable: boolean | undefined;
+
     try {
-      const payload = (await response.json()) as { error?: string };
-      if (payload.error) message = payload.error;
+      const payload = (await response.json()) as {
+        error?: string;
+        message?: string;
+        code?: string;
+        requestId?: string;
+        retryable?: boolean;
+      };
+      if (payload.error || payload.message) message = payload.error || payload.message || message;
+      code = payload.code;
+      requestId = payload.requestId;
+      retryable = payload.retryable;
     } catch {
       // Non-JSON server response.
+      if (response.status === 401) {
+        message = "Please log in to continue.";
+      } else if (response.status === 403) {
+        message = "You do not have permission to perform this action.";
+      } else if (response.status === 413) {
+        message = "File is too large. Maximum size is 50 MB.";
+      } else if (response.status === 503) {
+        message = "Service is temporarily unavailable. Please try again.";
+      } else if (response.status === 504) {
+        message = "Request timed out. Please try again with a smaller file or Fast mode.";
+      }
     }
-    throw new Error(message);
+
+    if (response.status === 401 && !message.toLowerCase().includes("log in")) {
+      message = "Please log in to continue.";
+    }
+
+    throw new ApiError(message, response.status, { code, requestId, retryable });
   }
   return (await response.json()) as T;
 }

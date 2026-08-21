@@ -14,6 +14,7 @@ import {
   History,
   Loader2,
   RotateCcw,
+  RefreshCw,
   Save,
   ScanLine,
   Sparkles,
@@ -148,10 +149,68 @@ function ScannerPage() {
     );
   };
 
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (stage !== "processing") {
+      setElapsedSec(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setElapsedSec((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [stage]);
+
+  const cancelProcessing = async () => {
+    if (!job?.id) {
+      setStage("idle");
+      return;
+    }
+    try {
+      await apiFetch(`/api/ocr/jobs/${encodeURIComponent(job.id)}/cancel`, { method: "POST" });
+      toast.info("OCR processing cancelled.");
+    } catch {
+      // ignore
+    } finally {
+      setStage("idle");
+      setJob(null);
+      await navigate({ to: "/scanner", search: {}, replace: true });
+    }
+  };
+
+  const retryFastMode = async () => {
+    if (!job?.id) return;
+    setQualityMode("fast");
+    setReprocessing(true);
+    setElapsedSec(0);
+    try {
+      const result = await apiFetch<{ job: OcrJob }>(
+        `/api/ocr/jobs/${encodeURIComponent(job.id)}/reprocess`,
+        {
+          method: "POST",
+          body: JSON.stringify({ qualityMode: "fast", profile, language: ocrLanguage }),
+        },
+      );
+      applyJob(result.job);
+      toast.success("Reprocessing in Fast mode...");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not retry in Fast mode");
+    } finally {
+      setReprocessing(false);
+    }
+  };
+
   const chooseFiles = async (selected: FileList | File[]) => {
     const files = Array.from(selected).filter(Boolean);
     if (!files.length) return;
+    if (!auth.data?.user) {
+      toast.error("Please log in to use the AI OCR Scanner.");
+      navigate({ to: "/login" });
+      return;
+    }
     setStage("processing");
+    setElapsedSec(0);
     try {
       const form = new FormData();
       for (const file of files) form.append("images", file);
@@ -165,7 +224,7 @@ function ScannerPage() {
       await queryClient.invalidateQueries({ queryKey: ["ocr-jobs"] });
     } catch (error) {
       setStage("idle");
-      toast.error(error instanceof Error ? error.message : "OCR failed");
+      toast.error(error instanceof Error ? error.message : "OCR failed to start");
     }
   };
 
@@ -563,29 +622,54 @@ function ScannerPage() {
                 </div>
                 <div>
                   <p className="font-display text-lg font-semibold text-foreground">
-                    {job?.currentStage || formatOcrStage(job?.stage) || "Extracting text and structure..."}
+                    {formatOcrStage(job?.stage || job?.currentStage)}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {job?.totalPages && job.totalPages > 1
-                      ? `Processing page ${job.pagesCompleted || 1} of ${job.totalPages}`
-                      : "Enhancing contrast, deskewing, and recognizing text"}
+                      ? `Page ${job.pagesCompleted || 1} of ${job.totalPages} · ${job.profile || "exam"}`
+                      : `${qualityMode === "fast" ? "Fast Mode" : qualityMode === "balanced" ? "Balanced Mode" : "Accurate Mode"} · Enhancing and recognizing text`}
                   </p>
                 </div>
-                <div className="space-y-1.5 text-left">
-                  <div className="flex justify-between text-xs font-semibold text-muted-foreground">
-                    <span>OCR Progress</span>
-                    <span className="text-brand">
-                      {Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%
+
+                <div className="rounded-lg bg-surface border border-border/80 p-3 text-xs space-y-1.5">
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Elapsed time</span>
+                    <span className="font-mono font-medium text-foreground">
+                      {Math.floor(elapsedSec / 60)}m {String(elapsedSec % 60).padStart(2, "0")}s
                     </span>
                   </div>
-                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-brand transition-all duration-500 ease-out"
-                      style={{
-                        width: `${Math.max(15, Math.min(100, Math.round(job?.progress || 50)))}%`,
-                      }}
-                    />
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Quality mode</span>
+                    <span className="font-medium text-foreground capitalize">{qualityMode}</span>
                   </div>
+                </div>
+
+                {elapsedSec >= 45 && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400 text-left space-y-2">
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      <AlertTriangle className="size-4 shrink-0" /> OCR is taking longer than expected
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      The document might be complex. You can let it finish or restart with Fast mode for immediate text.
+                    </p>
+                    <div className="flex gap-2 pt-1">
+                      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={retryFastMode}>
+                        <RefreshCw className="mr-1 size-3" /> Retry with Fast Mode
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-center pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 px-4 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={cancelProcessing}
+                  >
+                    <X className="mr-1 size-3.5" /> Cancel Processing
+                  </Button>
                 </div>
               </div>
             </div>

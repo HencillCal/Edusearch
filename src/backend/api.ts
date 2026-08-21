@@ -76,6 +76,8 @@ export async function handleApiRequest(request: Request): Promise<Response | nul
   const compatibilityRequest = url.pathname === "/extract";
   if (!url.pathname.startsWith("/api/") && !healthRequest && !compatibilityRequest) return null;
 
+  const requestId = "req_" + randomUUID().slice(0, 10);
+
   try {
     initializeDatabase();
     resumePendingOcrJobs();
@@ -84,10 +86,53 @@ export async function handleApiRequest(request: Request): Promise<Response | nul
     const response = await routeRequest(request, url);
     return secure(response);
   } catch (error) {
-    if (error instanceof HttpError)
-      return secure(json({ error: error.message, details: error.details }, error.status));
-    console.error("EduSearch API error", error);
-    return secure(json({ error: "The server could not complete this request." }, 500));
+    if (error instanceof HttpError) {
+      const code =
+        (error as { code?: string }).code ||
+        (error.status === 401
+          ? "UNAUTHORIZED"
+          : error.status === 403
+            ? "FORBIDDEN"
+            : error.status === 404
+              ? "NOT_FOUND"
+              : error.status === 409
+                ? "CONFLICT"
+                : error.status === 413
+                  ? "PAYLOAD_TOO_LARGE"
+                  : error.status === 422
+                    ? "UNPROCESSABLE"
+                    : error.status === 429
+                      ? "RATE_LIMITED"
+                      : "REQUEST_FAILED");
+      return secure(
+        json(
+          {
+            error: error.message,
+            code,
+            requestId,
+            details: error.details,
+            retryable: error.status >= 500,
+          },
+          error.status,
+        ),
+      );
+    }
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error(
+      `[EduSearch API Error] requestId=${requestId} route=${request.method} ${url.pathname} message=${err.message}`,
+      err.stack,
+    );
+    return secure(
+      json(
+        {
+          error: "An unexpected error occurred while processing this request. Please try again.",
+          code: "INTERNAL_ERROR",
+          requestId,
+          retryable: true,
+        },
+        500,
+      ),
+    );
   }
 }
 
@@ -117,6 +162,8 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
     return json({ user: sessionFromRequest(request) });
 
   if (method === "POST" && pathname === "/api/uploads/analyze") return analyzeUploads(request);
+  if (method === "POST" && pathname === "/api/uploads/analyze-file")
+    return analyzeSingleUpload(request);
   if (method === "POST" && pathname === "/api/uploads/submit") return submitUpload(request);
   if (method === "GET" && pathname === "/api/uploads/mine") return myUploads(request);
 
@@ -1464,11 +1511,29 @@ function logout(request: Request) {
   return json({ ok: true }, 200, { "set-cookie": destroySession(request) });
 }
 
+async function analyzeSingleUpload(request: Request) {
+  const user = requireUser(request);
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File)) throw new HttpError(400, "Please select a valid file to analyze.");
+  const stored = await storeFile(file, "staging");
+  const expanded = await expandZip(stored);
+  const analyzed: unknown[] = [];
+  for (const item of expanded) {
+    analyzed.push(await analyzeStoredFile(item, user));
+  }
+  return json({ uploads: analyzed, upload: analyzed[0] }, 201);
+}
+
 async function analyzeUploads(request: Request) {
   const user = requireUser(request);
   const form = await request.formData();
-  const incoming = form.getAll("files").filter((entry): entry is File => entry instanceof File);
-  if (!incoming.length) throw new HttpError(400, "Choose at least one file.");
+  let incoming = form.getAll("files").filter((entry): entry is File => entry instanceof File);
+  if (!incoming.length) {
+    const single = form.get("file");
+    if (single instanceof File) incoming = [single];
+  }
+  if (!incoming.length) throw new HttpError(400, "Choose at least one file to upload.");
   if (incoming.length > 25) throw new HttpError(400, "A batch can contain at most 25 files.");
   const analyzed: unknown[] = [];
 

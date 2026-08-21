@@ -595,7 +595,7 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
       }
       if (candidate.text.trim()) {
         candidates.push(candidate);
-        if (candidate.confidence >= 80 && candidate.text.trim().length >= 40) {
+        if (candidate.confidence >= 75 && candidate.text.trim().length >= 30) {
           break;
         }
       }
@@ -649,11 +649,14 @@ export async function runOcr(sourcePath: string, requested: OcrRunOptions = {}) 
   const ensemble = ensembleCandidateLines(ensembleCandidates);
   const postprocessed = postprocessOcrLines(ensemble.lines);
   const annotatedLines = annotateSpecialLines(postprocessed.lines);
-  const visionRefinement = await refineUncertainLinesWithVision(
-    prepared.enhancedPath,
-    annotatedLines,
-    options.language,
-  );
+  const visionRefinement =
+    options.qualityMode === "accurate" && primary.confidence < 80
+      ? await refineUncertainLinesWithVision(
+          prepared.enhancedPath,
+          annotatedLines,
+          options.language,
+        )
+      : { lines: annotatedLines, refinements: 0, warnings: [] as string[] };
   const cleanedLines = orderLinesByLayout(visionRefinement.lines, prepared.width, options.profile);
   const imageInfo = await sharp(prepared.enhancedPath).metadata();
   const confidence = weightedLineConfidence(cleanedLines, primary.confidence);
