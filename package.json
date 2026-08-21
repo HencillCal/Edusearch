@@ -20,7 +20,9 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run build",
     "validate:ocr-layout": "python3 scripts/validate_v12_layout.py",
-    "thumbnails:backfill": "node scripts/backfill-thumbnails.mjs"
+    "thumbnails:backfill": "node scripts/backfill-thumbnails.mjs",
+    "thumbnails:regenerate": "node scripts/thumbnails-regenerate.mjs"
+
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

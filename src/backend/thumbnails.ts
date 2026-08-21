@@ -66,65 +66,125 @@ export async function generateDocumentThumbnail(doc: ThumbnailDocData): Promise<
   const outputPath = path.join(thumbnailsDir, `${doc.id}.webp`);
 
   try {
-    let sourceBuffer: Buffer | null = null;
-    if (doc.storagePath && existsSync(doc.storagePath)) {
-      sourceBuffer = await readFile(doc.storagePath);
-    }
-
     const fileType = String(doc.fileType || "PDF").toUpperCase();
+    const isImageType = ["IMAGE", "PNG", "JPG", "JPEG", "WEBP"].includes(fileType);
 
-    if (sourceBuffer && (fileType === "IMAGE" || fileType === "PNG" || fileType === "JPG" || fileType === "JPEG" || fileType === "WEBP")) {
-      await sharp(sourceBuffer)
-        .resize(320, 420, { fit: "cover", position: "top" })
+    if (isImageType && doc.storagePath && existsSync(doc.storagePath)) {
+      // For image files: resize directly with sharp, contain (no crop)
+      const srcBuffer = await readFile(doc.storagePath);
+      await sharp(srcBuffer)
+        .resize(220, 290, { fit: "contain", background: { r: 247, g: 246, b: 239, alpha: 1 } })
         .webp({ quality: 85 })
         .toFile(outputPath);
-    } else if (sourceBuffer && fileType === "PDF") {
-      let rendered = false;
-      try {
-        // Try native Sharp PDF page 0 rendering
-        await sharp(sourceBuffer, { density: 140, page: 0 } as any)
-          .resize(320, 420, { fit: "cover", position: "top" })
-          .webp({ quality: 85 })
-          .toFile(outputPath);
-        rendered = true;
-      } catch {
-        rendered = false;
-      }
-
+    } else if (fileType === "PDF" && doc.storagePath && existsSync(doc.storagePath)) {
+      // For PDFs: MUST render actual first page — never fake it
+      const rendered = await renderPdfFirstPage(doc.storagePath, outputPath);
       if (!rendered) {
-        // High fidelity visual cover rendering via SVG + Sharp
-        const svg = createAcademicCoverSvg(doc);
-        await sharp(Buffer.from(svg))
-          .resize(320, 420)
-          .webp({ quality: 90 })
-          .toFile(outputPath);
+        // Neutral PDF placeholder — no synthetic academic cover
+        await generateNeutralPlaceholder(doc, outputPath);
       }
     } else {
-      // DOCX, OCR, or text documents without raw PDF page image
-      const svg = createAcademicCoverSvg(doc);
-      await sharp(Buffer.from(svg))
-        .resize(320, 420)
-        .webp({ quality: 90 })
-        .toFile(outputPath);
+      // DOCX or other: neutral placeholder
+      await generateNeutralPlaceholder(doc, outputPath);
     }
 
-    // Record in database
+    // Record in database with version bump
     const db = getDb();
-    db.prepare("UPDATE documents SET thumbnail_path=?, thumbnail_status='ready', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(
-      outputPath,
-      doc.id,
-    );
+    db.prepare(
+      "UPDATE documents SET thumbnail_path=?, thumbnail_status='ready', thumbnail_version=COALESCE(thumbnail_version,0)+1, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    ).run(outputPath, doc.id);
 
     return outputPath;
   } catch (error) {
     console.error(`Failed to generate thumbnail for doc ${doc.id}:`, error);
     try {
       const db = getDb();
-      db.prepare("UPDATE documents SET thumbnail_status='failed', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(doc.id);
+      db.prepare(
+        "UPDATE documents SET thumbnail_status='failed', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      ).run(doc.id);
     } catch {}
     throw error;
   }
 }
+
+/** Render PDF first page using pdftoppm or pdftocairo, return true on success */
+async function renderPdfFirstPage(pdfPath: string, outputPath: string): Promise<boolean> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+  const { rm } = await import("node:fs/promises");
+  const tmpBase = outputPath.replace(/\.webp$/, "-pdftmp");
+
+  // Try pdftoppm
+  try {
+    await execFileAsync(
+      "pdftoppm",
+      ["-f", "1", "-l", "1", "-singlefile", "-r", "110", "-png", pdfPath, tmpBase],
+      { timeout: 30_000 },
+    );
+    const tmpPng = `${tmpBase}.png`;
+    if (existsSync(tmpPng)) {
+      await sharp(tmpPng)
+        .resize(220, 290, { fit: "contain", background: { r: 247, g: 246, b: 239, alpha: 1 } })
+        .webp({ quality: 85 })
+        .toFile(outputPath);
+      await rm(tmpPng, { force: true });
+      return true;
+    }
+  } catch {
+    // pdftoppm unavailable or failed; try pdftocairo
+  }
+
+  // Try pdftocairo
+  try {
+    const tmpCairoBase = `${tmpBase}-cairo`;
+    await execFileAsync(
+      "pdftocairo",
+      ["-f", "1", "-l", "1", "-singlefile", "-r", "110", "-png", pdfPath, tmpCairoBase],
+      { timeout: 30_000 },
+    );
+    const tmpPng = `${tmpCairoBase}.png`;
+    if (existsSync(tmpPng)) {
+      await sharp(tmpPng)
+        .resize(220, 290, { fit: "contain", background: { r: 247, g: 246, b: 239, alpha: 1 } })
+        .webp({ quality: 85 })
+        .toFile(outputPath);
+      await rm(tmpPng, { force: true });
+      return true;
+    }
+  } catch {
+    // pdftocairo also unavailable
+  }
+
+  return false;
+}
+
+/** Neutral PDF placeholder: white background, PDF icon, and title. No fake covers. */
+async function generateNeutralPlaceholder(doc: ThumbnailDocData, outputPath: string): Promise<void> {
+  const title = escapeXml((doc.title || "Document").slice(0, 60));
+  const fileType = String(doc.fileType || "PDF").toUpperCase().slice(0, 6);
+  const svg = `<svg width="220" height="290" viewBox="0 0 220 290" xmlns="http://www.w3.org/2000/svg">
+  <rect width="220" height="290" fill="#f7f6ef" rx="4"/>
+  <rect width="220" height="290" fill="none" stroke="#e2e0d8" stroke-width="1" rx="4"/>
+  <!-- PDF icon -->
+  <rect x="75" y="60" width="70" height="88" rx="4" fill="#e8e6df" stroke="#c8c5bc" stroke-width="1.5"/>
+  <path d="M120 60 L145 85" stroke="#c8c5bc" stroke-width="1.5" fill="none"/>
+  <rect x="120" y="60" width="25" height="25" rx="2" fill="#d4d1c9"/>
+  <rect x="85" y="98" width="50" height="3" rx="1.5" fill="#b8b5ad"/>
+  <rect x="85" y="107" width="42" height="3" rx="1.5" fill="#b8b5ad"/>
+  <rect x="85" y="116" width="46" height="3" rx="1.5" fill="#b8b5ad"/>
+  <rect x="85" y="125" width="38" height="3" rx="1.5" fill="#b8b5ad"/>
+  <!-- File type badge -->
+  <rect x="82" y="163" width="56" height="20" rx="3" fill="#6b7280" opacity="0.15"/>
+  <text x="110" y="177" font-family="system-ui,sans-serif" font-size="11" font-weight="600" fill="#6b7280" text-anchor="middle">${fileType}</text>
+  <!-- Title -->
+  <text x="110" y="215" font-family="system-ui,sans-serif" font-size="11" fill="#374151" text-anchor="middle" dominant-baseline="middle">${title.slice(0, 28)}</text>
+  ${title.length > 28 ? `<text x="110" y="232" font-family="system-ui,sans-serif" font-size="11" fill="#374151" text-anchor="middle" dominant-baseline="middle">${escapeXml(doc.title.slice(28, 56))}</text>` : ""}
+</svg>`;
+  await sharp(Buffer.from(svg)).webp({ quality: 85 }).toFile(outputPath);
+}
+
+
 
 function escapeXml(unsafe: string): string {
   return String(unsafe || "")

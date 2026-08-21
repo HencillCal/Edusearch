@@ -518,15 +518,17 @@ function subjects(request: Request) {
     count: number;
   }>;
 
+  // Only show topics with show_in_browse = 1 in the Browse view.
+  // Hidden topics (show_in_browse = 0) remain searchable but don't clutter the sidebar.
   const topicStatement = db.prepare(
     `
-    SELECT t.id, t.name, t.synonyms_json,
+    SELECT t.id, t.name, t.synonyms_json, t.show_in_browse,
            COUNT(DISTINCT d.id) AS count
     FROM topics t
     LEFT JOIN document_topics dt ON dt.topic_id = t.id
     LEFT JOIN documents d ON (d.id = dt.document_id OR lower(d.topics_json) LIKE '%' || lower(t.name) || '%')
          AND d.status = 'published' AND ${access.sql}
-    WHERE t.subject_id = ?
+    WHERE t.subject_id = ? AND t.show_in_browse = 1
     GROUP BY t.id ORDER BY t.name
   `,
   );
@@ -541,16 +543,19 @@ function subjects(request: Request) {
           id: number;
           name: string;
           synonyms_json: string;
+          show_in_browse: number;
           count: number;
         }>
       ).map((topic) => ({
         name: topic.name,
         count: Number(topic.count),
         synonyms: jsonArray(topic.synonyms_json),
+        showInBrowse: Boolean(topic.show_in_browse),
       })),
     })),
   });
 }
+
 
 async function search(request: Request, url: URL) {
   const db = getDb();
@@ -879,11 +884,11 @@ function runLexicalSearch(
     if (query) {
       likeWhere.push(
         `(lower(d.title) LIKE ? OR lower(d.subject) LIKE ? OR lower(d.topics_json) LIKE ? OR lower(d.description) LIKE ? OR lower(d.extracted_text) LIKE ? OR EXISTS (
-          SELECT 1 FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE dt.document_id=d.id AND lower(t.name) LIKE ?
+          SELECT 1 FROM document_topics dt JOIN topics t ON t.id=dt.topic_id WHERE dt.document_id=d.id AND (lower(t.name) LIKE ? OR lower(t.synonyms_json) LIKE ?)
         ))`,
       );
       const like = `%${query.toLowerCase()}%`;
-      likeParams.push(like, like, like, like, like, like);
+      likeParams.push(like, like, like, like, like, like, like);
     }
     const order =
       sort === "downloads"
@@ -1169,7 +1174,7 @@ async function documentThumbnail(request: Request, id: string) {
         extractedText: row.extracted_text ? String(row.extracted_text) : "",
       });
     } catch {
-      // Fallback
+      // If generation fails, fall through to 404
     }
   }
 
@@ -1178,14 +1183,16 @@ async function documentThumbnail(request: Request, id: string) {
     throw new HttpError(404, "Thumbnail not ready.");
   }
 
-  const etag = `"${id}-${bytes.length}"`;
+  // Cheap ETag: doc id + version (no full-file hash)
+  const version = Number(row.thumbnail_version ?? 0);
+  const etag = `"${id}-v${version}"`;
   const ifNoneMatch = request.headers.get("if-none-match");
   if (ifNoneMatch && ifNoneMatch === etag) {
     return new Response(null, {
       status: 304,
       headers: {
         "etag": etag,
-        "cache-control": "public, max-age=86400",
+        "cache-control": "public, max-age=604800, immutable",
       },
     });
   }
@@ -1194,10 +1201,11 @@ async function documentThumbnail(request: Request, id: string) {
     headers: {
       "content-type": "image/webp",
       "content-length": String(bytes.length),
-      "cache-control": "public, max-age=86400",
+      "cache-control": "public, max-age=604800, immutable",
       "etag": etag,
     },
   });
+
 }
 
 async function downloadDocument(request: Request, id: string, preview: boolean) {
@@ -1211,50 +1219,146 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
   if (!preview && row.download_status !== "allowed")
     throw new HttpError(403, "Downloads are restricted for this document.");
 
-  let bytes: Buffer;
-  let filename: string;
-  let contentType: string;
   const storagePath = typeof row.storage_path === "string" ? row.storage_path : "";
   const originalName = String(
     row.original_filename || `${slugify(String(row.title))}.${String(row.file_type).toLowerCase()}`,
   );
+  const filename = preview ? `${slugify(String(row.title))}-preview.pdf` : originalName;
+  const contentType = preview ? "application/pdf" : contentTypeFromName(filename);
+  const cacheControl = preview ? "public, max-age=86400" : "private, no-store";
+  const disposition = `${preview ? "inline" : "attachment"}; filename="${filename.replace(/"/g, "")}"`;
 
-  if (preview) {
-    if (String(row.file_type) === "PDF" && storagePath) {
-      bytes = await readFile(storagePath).catch(() => Buffer.alloc(0));
-      if (!bytes.length)
-        bytes = await createPdf(
-          String(row.title),
-          String(row.extracted_text || row.description || row.title),
-        );
-    } else {
-      bytes = await createPdf(
-        String(row.title),
-        String(row.extracted_text || row.description || row.title),
+  // ── FAST PATH: real PDF file on disk — stream ranges without reading entire file ──
+  if (preview && String(row.file_type) === "PDF" && storagePath && existsSync(storagePath)) {
+    const { stat, createReadStream } = await import("node:fs");
+    const { promisify } = await import("node:util");
+    const statAsync = promisify(stat);
+
+    let fileStat: import("node:fs").Stats;
+    try {
+      fileStat = await statAsync(storagePath);
+    } catch {
+      // File missing — fall through to generated PDF below
+      return servePdfBytes(
+        await createPdf(String(row.title), String(row.extracted_text || row.description || row.title)),
+        request, filename, contentType, disposition, cacheControl,
       );
     }
-    filename = `${slugify(String(row.title))}-preview.pdf`;
-    contentType = "application/pdf";
-  } else if (storagePath) {
-    bytes = await readFile(storagePath).catch(() => Buffer.alloc(0));
-    if (!bytes.length) bytes = await generatedOriginal(row);
-    filename = originalName;
-    contentType = contentTypeFromName(filename);
-  } else {
-    bytes = await generatedOriginal(row);
-    const extension = String(row.file_type) === "DOCX" ? "docx" : "pdf";
-    filename = `${slugify(String(row.title))}.${extension}`;
-    contentType = contentTypeFromName(filename);
+
+    const totalLength = fileStat.size;
+    // Cheap ETag: size + mtime — no reading the file
+    const etag = `"${totalLength}-${fileStat.mtimeMs.toFixed(0)}"`;
+
+    if (request.method.toUpperCase() === "HEAD") {
+      return new Response(null, {
+        headers: {
+          "content-type": contentType,
+          "content-length": String(totalLength),
+          "accept-ranges": "bytes",
+          "etag": etag,
+          "content-disposition": disposition,
+          "cache-control": cacheControl,
+        },
+      });
+    }
+
+    const ifNoneMatch = request.headers.get("if-none-match");
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new Response(null, { status: 304, headers: { etag, "cache-control": cacheControl, "accept-ranges": "bytes" } });
+    }
+
+    const rangeHeader = request.headers.get("range");
+    if (rangeHeader && rangeHeader.startsWith("bytes=")) {
+      const rangeSpec = rangeHeader.slice(6).trim();
+      const [startStr, endStr] = rangeSpec.split("-");
+      let start = parseInt(startStr, 10);
+      let end = endStr ? parseInt(endStr, 10) : totalLength - 1;
+      if (isNaN(start)) { start = totalLength - parseInt(endStr, 10); end = totalLength - 1; }
+      if (isNaN(end) || end >= totalLength) end = totalLength - 1;
+
+      if (start >= 0 && start <= end && end < totalLength) {
+        const nodeStream = createReadStream(storagePath, { start, end });
+        const webStream = new ReadableStream({
+          start(controller) {
+            nodeStream.on("data", (chunk) => controller.enqueue(chunk instanceof Buffer ? chunk : Buffer.from(chunk)));
+            nodeStream.on("end", () => controller.close());
+            nodeStream.on("error", (e) => controller.error(e));
+          },
+          cancel() { nodeStream.destroy(); },
+        });
+        return new Response(webStream, {
+          status: 206,
+          headers: {
+            "content-type": contentType,
+            "content-length": String(end - start + 1),
+            "content-range": `bytes ${start}-${end}/${totalLength}`,
+            "accept-ranges": "bytes",
+            "etag": etag,
+            "content-disposition": disposition,
+            "cache-control": cacheControl,
+          },
+        });
+      }
+    }
+
+    // Full file stream (no range)
+    const nodeStream = createReadStream(storagePath);
+    const webStream = new ReadableStream({
+      start(controller) {
+        nodeStream.on("data", (chunk) => controller.enqueue(chunk instanceof Buffer ? chunk : Buffer.from(chunk)));
+        nodeStream.on("end", () => controller.close());
+        nodeStream.on("error", (e) => controller.error(e));
+      },
+      cancel() { nodeStream.destroy(); },
+    });
+    return new Response(webStream, {
+      headers: {
+        "content-type": contentType,
+        "content-length": String(totalLength),
+        "accept-ranges": "bytes",
+        "etag": etag,
+        "content-disposition": disposition,
+        "cache-control": cacheControl,
+      },
+    });
   }
 
-  if (!preview && request.method.toUpperCase() === "GET") {
-    db.prepare("UPDATE documents SET downloads=downloads+1 WHERE id=?").run(id);
-    db.prepare("INSERT INTO download_logs(document_id,user_id) VALUES(?,?)").run(
-      id,
-      user?.id ?? null,
+  // ── DOWNLOAD PATH (non-preview) or fallback generated PDF ──
+  let bytes: Buffer;
+  if (!preview && storagePath && existsSync(storagePath)) {
+    bytes = await readFile(storagePath).catch(() => Buffer.alloc(0));
+    if (!bytes.length) bytes = await generatedOriginal(row);
+  } else if (!preview) {
+    bytes = await generatedOriginal(row);
+  } else {
+    // preview but no real PDF file (DOCX or missing) → generate
+    bytes = await createPdf(
+      String(row.title),
+      String(row.extracted_text || row.description || row.title),
     );
   }
 
+  // Async view/download counter — non-blocking
+  if (!preview && request.method.toUpperCase() === "GET") {
+    setImmediate(() => {
+      try {
+        db.prepare("UPDATE documents SET downloads=downloads+1 WHERE id=?").run(id);
+        db.prepare("INSERT INTO download_logs(document_id,user_id) VALUES(?,?)").run(id, user?.id ?? null);
+      } catch {}
+    });
+  }
+
+  return servePdfBytes(bytes, request, filename, contentType, disposition, cacheControl);
+}
+
+function servePdfBytes(
+  bytes: Buffer,
+  request: Request,
+  filename: string,
+  contentType: string,
+  disposition: string,
+  cacheControl: string,
+): Response {
   const totalLength = bytes.length;
   const etag = `"${createHash("md5").update(bytes).digest("hex")}"`;
 
@@ -1262,11 +1366,7 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
   if (ifNoneMatch && ifNoneMatch === etag) {
     return new Response(null, {
       status: 304,
-      headers: {
-        "etag": etag,
-        "accept-ranges": "bytes",
-        "cache-control": preview ? "public, max-age=86400" : "private, no-store",
-      },
+      headers: { etag, "accept-ranges": "bytes", "cache-control": cacheControl },
     });
   }
 
@@ -1276,16 +1376,9 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
     const [startStr, endStr] = rangeSpec.split("-");
     let start = parseInt(startStr, 10);
     let end = endStr ? parseInt(endStr, 10) : totalLength - 1;
-
-    if (isNaN(start)) {
-      start = totalLength - parseInt(endStr, 10);
-      end = totalLength - 1;
-    }
-    if (isNaN(end) || end >= totalLength) {
-      end = totalLength - 1;
-    }
-
-    if (start <= end && start >= 0 && end < totalLength) {
+    if (isNaN(start)) { start = totalLength - parseInt(endStr, 10); end = totalLength - 1; }
+    if (isNaN(end) || end >= totalLength) end = totalLength - 1;
+    if (start >= 0 && start <= end && end < totalLength) {
       const chunk = bytes.subarray(start, end + 1);
       return new Response(arrayBufferBody(chunk), {
         status: 206,
@@ -1295,8 +1388,8 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
           "content-range": `bytes ${start}-${end}/${totalLength}`,
           "accept-ranges": "bytes",
           "etag": etag,
-          "content-disposition": `${preview ? "inline" : "attachment"}; filename="${filename.replace(/"/g, "")}"`,
-          "cache-control": preview ? "public, max-age=86400" : "private, no-store",
+          "content-disposition": disposition,
+          "cache-control": cacheControl,
         },
       });
     }
@@ -1308,11 +1401,13 @@ async function downloadDocument(request: Request, id: string, preview: boolean) 
       "content-length": String(totalLength),
       "accept-ranges": "bytes",
       "etag": etag,
-      "content-disposition": `${preview ? "inline" : "attachment"}; filename="${filename.replace(/"/g, "")}"`,
-      "cache-control": preview ? "public, max-age=86400" : "private, no-store",
+      "content-disposition": disposition,
+      "cache-control": cacheControl,
     },
   });
 }
+
+
 
 async function generatedOriginal(row: Record<string, unknown>) {
   const text = String(row.extracted_text || row.description || row.title);
@@ -2093,10 +2188,13 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
     updateOcrProcessingStage(id, "ocr_running");
     const firstPage = source.pages[0];
     const isPdf = source.pages.length === 1 && firstPage.extension === ".pdf";
-    const result = isPdf
+
+    // ── STAGE A: Fast initial pass — open editor as soon as we have any usable text ──
+    const initialStartMs = Date.now();
+    const initialResult = isPdf
       ? await runPdfOcr(firstPage.path, {
           profile: options.profile,
-          qualityMode: options.qualityMode,
+          qualityMode: "fast", // always fast for initial pass
           language: options.language,
           forceImageOcr: options.forceImageOcr,
         })
@@ -2104,145 +2202,340 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
           source.pages.map((page) => ({ path: page.path, originalName: page.originalName })),
           {
             profile: options.profile,
-            qualityMode: options.qualityMode,
+            qualityMode: "fast",
             language: options.language,
             forceImageOcr: options.forceImageOcr,
           },
           (progress: { page: number; total: number; stage: string }) => updateOcrProgress(id, progress),
         );
+    const initialOcrMs = Date.now() - initialStartMs;
+
     assertOcrJobActive(id);
     updateOcrProcessingStage(id, "ocr_completed");
     updateOcrProcessingStage(id, "layout_analysis");
-    const structure = normalizeOcrStructure(result.structure, result.text, result.confidence);
-    updateOcrProcessingStage(id, "reconstructing");
-    const correctedText = ocrStructureToText(structure).trim();
-    assertOcrJobActive(id);
-    if (!isActualOcrText(correctedText))
+    const initialStructure = normalizeOcrStructure(
+      initialResult.structure,
+      initialResult.text,
+      initialResult.confidence,
+    );
+    const initialText = ocrStructureToText(initialStructure).trim();
+    const initialCharacters = initialText.length;
+    const initialConfidence = initialResult.confidence;
+
+    // Write initial text to DB immediately so the editor can open
+    if (isActualOcrText(initialText)) {
+      const originalName = source.pages.map((page) => page.originalName).join(", ");
+      const sourceExtension = source.pages[0]?.extension || ".jpg";
+      const initialMetadata = await suggestMetadata(
+        originalName,
+        initialText,
+        sourceExtension === ".pdf" ? "PDF" : "Image",
+        initialStructure.stats.pages || initialResult.enhancedPaths.length || 1,
+      );
+      const initialPreflight = assessReconstructionQuality(initialStructure, initialMetadata);
+      initialPreflight.ready = initialPreflight.errors.length === 0;
+      const initialStatus = initialPreflight.ready ? "ready" : "awaiting_correction";
+      const initialStage = initialPreflight.ready ? "verified" : "awaiting_review";
+      const initialPipeline = {
+        ...initialResult.pipeline,
+        processingMs: initialOcrMs,
+        documentType: initialResult.pipeline.documentType || inferOcrDocumentType(initialMetadata.docType),
+        refinementPending: options.qualityMode !== "fast",
+      };
+
+      db.prepare(
+        `UPDATE ocr_jobs SET enhanced_paths_json=?,extracted_text=?,corrected_text=?,confidence=?,quality_score=?,pipeline_json=?,metadata_json=?,structure_json=?,revision=?,status=?,processing_stage=?,progress=?,pages_completed=?,total_pages=?,current_stage=?,document_type=?,diagnostics_json=?,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      ).run(
+        JSON.stringify(initialResult.enhancedPaths),
+        initialResult.text,
+        initialText,
+        initialConfidence,
+        initialResult.qualityScore,
+        JSON.stringify(initialPipeline),
+        JSON.stringify({ ...initialMetadata, detectedDocumentType: initialPipeline.documentType }),
+        JSON.stringify(initialStructure),
+        options.revision,
+        initialStatus,
+        initialStage,
+        initialStage === "verified" ? 95 : 85,
+        initialStructure.stats.pages,
+        initialStructure.stats.pages,
+        `${initialStage.replaceAll("_", " ")} (initial)`,
+        initialPipeline.documentType,
+        JSON.stringify({
+          engine: initialPipeline.engine,
+          language: options.language,
+          preprocessMs: 0,
+          initialOcrMs,
+          initialCharacters,
+          initialConfidence,
+          durationMs: Date.now() - startedAt,
+          source: { extensions: source.pages.map((p) => p.extension), pageCount: source.pages.length },
+          rawCharacters: initialResult.text.length,
+          questionsDetected: initialStructure.stats.questions,
+          marksDetected: initialStructure.stats.totalMarks,
+          lowConfidenceRegions: initialStructure.stats.lowConfidenceBlocks,
+          refinementPending: options.qualityMode !== "fast",
+        }),
+        id,
+      );
+
+      // Persist initial revision
+      db.prepare(
+        `INSERT OR REPLACE INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by) VALUES(?,?,?,?,?,?,?)`,
+      ).run(
+        id,
+        options.revision,
+        initialText,
+        JSON.stringify({ ...initialMetadata, detectedDocumentType: initialPipeline.documentType }),
+        JSON.stringify(initialStructure),
+        `${options.note} (initial pass)`,
+        options.userId,
+      );
+
+      console.info("[EduSearch OCR] initial pass ready", {
+        jobId: id,
+        initialCharacters,
+        initialConfidence,
+        durationMs: Date.now() - startedAt,
+        mode: options.qualityMode,
+      });
+    }
+
+    // ── STAGE B: Background refinement — only for Balanced/Accurate and low confidence ──
+    const shouldRefine =
+      options.qualityMode !== "fast" &&
+      (initialConfidence < 82 || options.qualityMode === "accurate");
+
+    if (shouldRefine) {
+      assertOcrJobActive(id);
+      updateOcrProcessingStage(id, "ocr_running");
+      const refinementStartMs = Date.now();
+
+      const refinedResult = isPdf
+        ? await runPdfOcr(firstPage.path, {
+            profile: options.profile,
+            qualityMode: options.qualityMode,
+            language: options.language,
+            forceImageOcr: options.forceImageOcr,
+          })
+        : await runMultiPageOcr(
+            source.pages.map((page) => ({ path: page.path, originalName: page.originalName })),
+            {
+              profile: options.profile,
+              qualityMode: options.qualityMode,
+              language: options.language,
+              forceImageOcr: options.forceImageOcr,
+            },
+            (progress: { page: number; total: number; stage: string }) => updateOcrProgress(id, progress),
+          );
+      const refinementMs = Date.now() - refinementStartMs;
+
+      assertOcrJobActive(id);
+      updateOcrProcessingStage(id, "ocr_completed");
+      updateOcrProcessingStage(id, "layout_analysis");
+      const refinedStructure = normalizeOcrStructure(
+        refinedResult.structure,
+        refinedResult.text,
+        refinedResult.confidence,
+      );
+      updateOcrProcessingStage(id, "reconstructing");
+      const refinedText = ocrStructureToText(refinedStructure).trim();
+      assertOcrJobActive(id);
+
+      if (!isActualOcrText(refinedText))
+        throw new HttpError(422, "OCR completed but no readable source text was found.", {
+          stage: "reconstructing",
+          diagnostics: { rawTextLength: refinedResult.text.length },
+        });
+
+      const originalName = source.pages.map((page) => page.originalName).join(", ");
+      const sourceExtension = source.pages[0]?.extension || ".jpg";
+      const metadata = await suggestMetadata(
+        originalName,
+        refinedText,
+        sourceExtension === ".pdf" ? "PDF" : "Image",
+        refinedStructure.stats.pages || refinedResult.enhancedPaths.length || 1,
+      );
+      const preflight = assessReconstructionQuality(refinedStructure, metadata);
+      if (refinedResult.qualityScore < 70)
+        preflight.errors.push({
+          severity: "error",
+          code: "ocr-quality",
+          message: "Overall OCR quality is below the verified-export threshold.",
+        });
+      preflight.ready = preflight.errors.length === 0;
+      const status = preflight.ready ? "ready" : "awaiting_correction";
+      const stage = preflight.ready ? "verified" : "awaiting_review";
+      const pipeline = {
+        ...refinedResult.pipeline,
+        processingMs: Number(refinedResult.pipeline.processingMs || Date.now() - startedAt),
+        documentType: refinedResult.pipeline.documentType || inferOcrDocumentType(metadata.docType),
+        preprocessMs: 0,
+        initialOcrMs,
+        initialCharacters,
+        initialConfidence,
+        refinementMs,
+        refinementPasses: 1,
+        refinementPending: false,
+      };
+      db.prepare(
+        `UPDATE ocr_jobs SET enhanced_paths_json=?,extracted_text=?,corrected_text=?,confidence=?,quality_score=?,pipeline_json=?,metadata_json=?,structure_json=?,revision=?,status=?,processing_stage=?,progress=?,pages_completed=?,total_pages=?,current_stage=?,document_type=?,diagnostics_json=?,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      ).run(
+        JSON.stringify(refinedResult.enhancedPaths),
+        refinedResult.text,
+        refinedText,
+        refinedResult.confidence,
+        refinedResult.qualityScore,
+        JSON.stringify(pipeline),
+        JSON.stringify({ ...metadata, detectedDocumentType: pipeline.documentType }),
+        JSON.stringify(refinedStructure),
+        options.revision,
+        status,
+        stage,
+        stage === "verified" ? 100 : 90,
+        refinedStructure.stats.pages,
+        refinedStructure.stats.pages,
+        stage.replaceAll("_", " "),
+        pipeline.documentType,
+        JSON.stringify({
+          engine: pipeline.engine,
+          language: options.language,
+          preprocessMs: 0,
+          initialOcrMs,
+          initialCharacters,
+          initialConfidence,
+          refinementMs,
+          refinementPasses: 1,
+          durationMs: Date.now() - startedAt,
+          source: { extensions: source.pages.map((p) => p.extension), pageCount: source.pages.length },
+          rawCharacters: refinedResult.text.length,
+          questionsDetected: refinedStructure.stats.questions,
+          marksDetected: refinedStructure.stats.totalMarks,
+          lowConfidenceRegions: refinedStructure.stats.lowConfidenceBlocks,
+        }),
+        id,
+      );
+      persistOcrGeometry(
+        id,
+        refinedStructure,
+        refinedResult.enhancedPaths,
+        pipeline,
+        source.originalPaths || source.pages.map((page) => page.path),
+        source.pages.map((page) => page.originalName),
+        "success",
+      );
+      db.prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?").run(id, options.revision);
+      db.prepare(
+        `INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)`,
+      ).run(id, options.revision, preflight.ready ? 1 : 0, preflight.score, JSON.stringify(preflight.errors), JSON.stringify(preflight.warnings), JSON.stringify(preflight.checks));
+      db.prepare(
+        `INSERT OR REPLACE INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by) VALUES(?,?,?,?,?,?,?)`,
+      ).run(
+        id,
+        options.revision,
+        refinedText,
+        JSON.stringify({ ...metadata, detectedDocumentType: pipeline.documentType }),
+        JSON.stringify(refinedStructure),
+        options.note,
+        options.userId,
+      );
+      await Promise.all(
+        (options.oldEnhancedPaths || [])
+          .filter((filePath) => !refinedResult.enhancedPaths.includes(filePath))
+          .map((filePath) => unlink(filePath).catch(() => undefined)),
+      );
+      console.info("[EduSearch OCR] refinement completed", {
+        jobId: id,
+        initialConfidence,
+        refinedConfidence: refinedResult.confidence,
+        initialOcrMs,
+        refinementMs,
+        durationMs: Date.now() - startedAt,
+      });
+      audit(options.userId, "ocr.process", "ocr_job", id, {
+        pages: refinedStructure.stats.pages,
+        confidence: refinedResult.confidence,
+        qualityScore: refinedResult.qualityScore,
+        questions: refinedStructure.stats.questions,
+        marks: refinedStructure.stats.totalMarks,
+        status,
+        stage,
+        twoStage: true,
+      });
+      return;
+    }
+
+    // Fast mode completed — just do final cleanup and preflight
+    if (isActualOcrText(initialText)) {
+      const originalName = source.pages.map((page) => page.originalName).join(", ");
+      const sourceExtension = source.pages[0]?.extension || ".jpg";
+      const metadata = await suggestMetadata(
+        originalName,
+        initialText,
+        sourceExtension === ".pdf" ? "PDF" : "Image",
+        initialStructure.stats.pages || initialResult.enhancedPaths.length || 1,
+      );
+      const preflight = assessReconstructionQuality(initialStructure, metadata);
+      if (initialResult.qualityScore < 70)
+        preflight.errors.push({
+          severity: "error",
+          code: "ocr-quality",
+          message: "Overall OCR quality is below the verified-export threshold.",
+        });
+      preflight.ready = preflight.errors.length === 0;
+      const pipeline = {
+        ...initialResult.pipeline,
+        processingMs: Date.now() - startedAt,
+        documentType: initialResult.pipeline.documentType || inferOcrDocumentType(metadata.docType),
+        preprocessMs: 0,
+        initialOcrMs,
+        initialCharacters,
+        initialConfidence,
+        refinementMs: 0,
+        refinementPasses: 0,
+        refinementPending: false,
+      };
+      db.prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?").run(id, options.revision);
+      db.prepare(
+        `INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)`,
+      ).run(id, options.revision, preflight.ready ? 1 : 0, preflight.score, JSON.stringify(preflight.errors), JSON.stringify(preflight.warnings), JSON.stringify(preflight.checks));
+      persistOcrGeometry(
+        id,
+        initialStructure,
+        initialResult.enhancedPaths,
+        pipeline,
+        source.originalPaths || source.pages.map((page) => page.path),
+        source.pages.map((page) => page.originalName),
+        "success",
+      );
+      await Promise.all(
+        (options.oldEnhancedPaths || [])
+          .filter((filePath) => !initialResult.enhancedPaths.includes(filePath))
+          .map((filePath) => unlink(filePath).catch(() => undefined)),
+      );
+      console.info("[EduSearch OCR] fast mode completed", {
+        jobId: id,
+        initialCharacters,
+        initialConfidence,
+        durationMs: Date.now() - startedAt,
+      });
+      audit(options.userId, "ocr.process", "ocr_job", id, {
+        pages: initialStructure.stats.pages,
+        confidence: initialConfidence,
+        qualityScore: initialResult.qualityScore,
+        questions: initialStructure.stats.questions,
+        marks: initialStructure.stats.totalMarks,
+        status: "ready",
+        stage: "verified",
+        twoStage: false,
+      });
+    } else {
       throw new HttpError(422, "OCR completed but no readable source text was found.", {
         stage: "reconstructing",
-        diagnostics: { rawTextLength: result.text.length },
+        diagnostics: { rawTextLength: initialResult.text.length },
       });
-    const originalName = source.pages.map((page) => page.originalName).join(", ");
-    const sourceExtension = source.pages[0]?.extension || ".jpg";
-    const metadata = await suggestMetadata(
-      originalName,
-      correctedText,
-      sourceExtension === ".pdf" ? "PDF" : "Image",
-      structure.stats.pages || result.enhancedPaths.length || 1,
-    );
-    const preflight = assessReconstructionQuality(structure, metadata);
-    if (result.qualityScore < 70)
-      preflight.errors.push({
-        severity: "error",
-        code: "ocr-quality",
-        message: "Overall OCR quality is below the verified-export threshold.",
-      });
-    preflight.ready = preflight.errors.length === 0;
-    const status = preflight.ready ? "ready" : "awaiting_correction";
-    const stage = preflight.ready ? "verified" : "awaiting_review";
-    const pipeline = {
-      ...result.pipeline,
-      processingMs: Number(result.pipeline.processingMs || Date.now() - startedAt),
-      documentType: result.pipeline.documentType || inferOcrDocumentType(metadata.docType),
-    };
-    db.prepare(
-      `
-      UPDATE ocr_jobs SET enhanced_paths_json=?,extracted_text=?,corrected_text=?,confidence=?,quality_score=?,pipeline_json=?,metadata_json=?,structure_json=?,revision=?,status=?,processing_stage=?,progress=?,pages_completed=?,total_pages=?,current_stage=?,document_type=?,diagnostics_json=?,error_message=NULL,updated_at=CURRENT_TIMESTAMP
-      WHERE id=?
-    `,
-    ).run(
-      JSON.stringify(result.enhancedPaths),
-      result.text,
-      correctedText,
-      result.confidence,
-      result.qualityScore,
-      JSON.stringify(pipeline),
-      JSON.stringify({ ...metadata, detectedDocumentType: pipeline.documentType }),
-      JSON.stringify(structure),
-      options.revision,
-      status,
-      stage,
-      stage === "verified" ? 100 : 90,
-      structure.stats.pages,
-      structure.stats.pages,
-      stage.replaceAll("_", " "),
-      pipeline.documentType,
-      JSON.stringify({
-        engine: pipeline.engine,
-        language: options.language,
-        durationMs: Date.now() - startedAt,
-        source: {
-          extensions: source.pages.map((page) => page.extension),
-          pageCount: source.pages.length,
-        },
-        rawCharacters: result.text.length,
-        questionsDetected: structure.stats.questions,
-        marksDetected: structure.stats.totalMarks,
-        lowConfidenceRegions: structure.stats.lowConfidenceBlocks,
-      }),
-      id,
-    );
-    persistOcrGeometry(
-      id,
-      structure,
-      result.enhancedPaths,
-      pipeline,
-      source.originalPaths || source.pages.map((page) => page.path),
-      source.pages.map((page) => page.originalName),
-      "success",
-    );
-    db.prepare("DELETE FROM ocr_preflight_results WHERE job_id=? AND revision=?").run(
-      id,
-      options.revision,
-    );
-    db.prepare(
-      `INSERT INTO ocr_preflight_results(job_id,revision,ready,score,errors_json,warnings_json,checks_json) VALUES(?,?,?,?,?,?,?)`,
-    ).run(
-      id,
-      options.revision,
-      preflight.ready ? 1 : 0,
-      preflight.score,
-      JSON.stringify(preflight.errors),
-      JSON.stringify(preflight.warnings),
-      JSON.stringify(preflight.checks),
-    );
-    db.prepare(
-      `
-      INSERT OR REPLACE INTO ocr_revisions(job_id,revision,corrected_text,metadata_json,structure_json,note,created_by)
-      VALUES(?,?,?,?,?,?,?)
-    `,
-    ).run(
-      id,
-      options.revision,
-      correctedText,
-      JSON.stringify({ ...metadata, detectedDocumentType: pipeline.documentType }),
-      JSON.stringify(structure),
-      options.note,
-      options.userId,
-    );
-    await Promise.all(
-      (options.oldEnhancedPaths || [])
-        .filter((filePath) => !result.enhancedPaths.includes(filePath))
-        .map((filePath) => unlink(filePath).catch(() => undefined)),
-    );
-    console.info("[EduSearch OCR] completed", {
-      jobId: id,
-      rawOcrText: result.text,
-      detectedQuestions: structure.stats.questions,
-      detectedMarks: structure.stats.totalMarks,
-      structuredBlocks: structure.stats.blocks,
-      preflightScore: preflight.score,
-      pdfSource: source.pages.map((page) => page.path),
-    });
-    audit(options.userId, "ocr.process", "ocr_job", id, {
-      pages: structure.stats.pages,
-      confidence: result.confidence,
-      qualityScore: result.qualityScore,
-      questions: structure.stats.questions,
-      marks: structure.stats.totalMarks,
-      status,
-      stage,
-    });
+    }
   } catch (error) {
     const details = error instanceof HttpError ? error.details : undefined;
     const errorMessage = error instanceof Error ? error.message : "OCR failed";
@@ -2262,12 +2555,7 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
       enhancedPath,
       id,
     );
-    console.error("[EduSearch OCR] failed", {
-      jobId: id,
-      stage: "ocr_running",
-      error: errorMessage,
-      details,
-    });
+    console.error("[EduSearch OCR] failed", { jobId: id, stage: "ocr_running", error: errorMessage, details });
     audit(options.userId, "ocr.failed", "ocr_job", id, { error: errorMessage, details });
   } finally {
     await Promise.all(
@@ -2275,6 +2563,7 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
     );
   }
 }
+
 
 function assertOcrJobActive(id: string) {
   const row = getDb().prepare("SELECT status,error_message FROM ocr_jobs WHERE id=?").get(id) as
@@ -3532,7 +3821,7 @@ async function addDocumentToCollection(request: Request, collectionId: string) {
   const body = await readJson(request);
   const documentId = requiredString(body.documentId, "Document ID");
   requireOwnedCollection(collectionId, user.id);
-  ensurePublishedDocument(documentId, user);
+  ensureDocumentCanBeCollected(documentId, user);
   getDb()
     .prepare("INSERT OR IGNORE INTO collection_documents(collection_id,document_id) VALUES(?,?)")
     .run(collectionId, documentId);
@@ -4491,7 +4780,7 @@ function adminTaxonomy(request: Request) {
   const topics = db
     .prepare(
       `
-    SELECT t.id,t.subject_id AS subjectId,s.name AS subjectName,t.name,t.description,t.synonyms_json AS synonymsJson,t.related_json AS relatedJson
+    SELECT t.id,t.subject_id AS subjectId,s.name AS subjectName,t.name,t.description,t.synonyms_json AS synonymsJson,t.related_json AS relatedJson,t.show_in_browse AS showInBrowse
     FROM topics t LEFT JOIN subjects s ON s.id=t.subject_id ORDER BY COALESCE(s.name,''),t.name
   `,
     )
@@ -4506,8 +4795,10 @@ function adminTaxonomy(request: Request) {
       description: String(topic.description || ""),
       synonyms: jsonArray(topic.synonymsJson),
       related: jsonArray(topic.relatedJson),
+      showInBrowse: Boolean(topic.showInBrowse ?? 1),
     })),
   });
+
 }
 
 async function createSubject(request: Request) {
@@ -4595,14 +4886,15 @@ async function createTopic(request: Request) {
     typeof body.description === "string" ? body.description.trim().slice(0, 500) : "";
   const synonyms = toStringArray(body.synonyms).slice(0, 30);
   const related = toStringArray(body.related).slice(0, 30);
+  const showInBrowse = body.showInBrowse === false ? 0 : 1;
   if (getDb().prepare("SELECT 1 FROM topics WHERE lower(name)=lower(?)").get(name))
     throw new HttpError(409, "A topic with that name already exists.");
   try {
     const result = getDb()
       .prepare(
-        "INSERT INTO topics(subject_id,name,description,synonyms_json,related_json) VALUES(?,?,?,?,?)",
+        "INSERT INTO topics(subject_id,name,description,synonyms_json,related_json,show_in_browse) VALUES(?,?,?,?,?,?)",
       )
-      .run(subjectId, name, description, JSON.stringify(synonyms), JSON.stringify(related));
+      .run(subjectId, name, description, JSON.stringify(synonyms), JSON.stringify(related), showInBrowse);
     audit(admin.id, "topic.create", "topic", String(result.lastInsertRowid), { name, subjectId });
     return json(
       {
@@ -4613,6 +4905,7 @@ async function createTopic(request: Request) {
           description,
           synonyms,
           related,
+          showInBrowse: Boolean(showInBrowse),
         },
       },
       201,
@@ -4661,13 +4954,20 @@ async function updateTopic(request: Request, id: number) {
     body.related === undefined
       ? jsonArray(current.related_json)
       : toStringArray(body.related).slice(0, 30);
+  const showInBrowse =
+    body.showInBrowse === undefined
+      ? Number(current.show_in_browse ?? 1)
+      : body.showInBrowse === false
+        ? 0
+        : 1;
   getDb()
     .prepare(
-      "UPDATE topics SET subject_id=?,name=?,description=?,synonyms_json=?,related_json=? WHERE id=?",
+      "UPDATE topics SET subject_id=?,name=?,description=?,synonyms_json=?,related_json=?,show_in_browse=? WHERE id=?",
     )
-    .run(subjectId, name, description, JSON.stringify(synonyms), JSON.stringify(related), id);
-  audit(admin.id, "topic.update", "topic", String(id), { name, subjectId });
-  return json({ topic: { id, subjectId, name, description, synonyms, related } });
+    .run(subjectId, name, description, JSON.stringify(synonyms), JSON.stringify(related), showInBrowse, id);
+  audit(admin.id, "topic.update", "topic", String(id), { name, subjectId, showInBrowse: Boolean(showInBrowse) });
+  return json({ topic: { id, subjectId, name, description, synonyms, related, showInBrowse: Boolean(showInBrowse) } });
+
 }
 
 function deleteTopic(request: Request, id: number) {
@@ -4981,7 +5281,7 @@ function mapDocument(row: unknown, user: SessionUser | null, includeContent = fa
         ? String(item.rights_restriction_note)
         : undefined,
     isSaved: saved,
-    thumbnailUrl: `/api/documents/${id}/thumbnail`,
+    thumbnailUrl: `/api/documents/${id}/thumbnail?v=${Number(item.thumbnail_version ?? 0)}`,
     thumbnailStatus: String(item.thumbnail_status || "ready"),
     ...(includeContent
       ? {
@@ -5630,6 +5930,31 @@ function ensurePublishedDocument(id: string, user: SessionUser | null) {
   ) {
     throw new HttpError(404, "Document not found or you do not have access.");
   }
+}
+
+/**
+ * Looser access check for "Save to Collection" — allows:
+ *  1. Any published document the user can see
+ *  2. A document the user uploaded themselves (any status)
+ * This fixes the regression where users couldn't add their own pending/review
+ * documents to collections.
+ */
+function ensureDocumentCanBeCollected(id: string, user: SessionUser) {
+  const db = getDb();
+  // Allow if it's the user's own upload (any status)
+  const ownDoc = db
+    .prepare("SELECT 1 FROM documents WHERE id=? AND uploaded_by=?")
+    .get(id, user.id);
+  if (ownDoc) return;
+
+  // Allow if it's a published document the user can access
+  const access = documentAccess(user, "d");
+  const pubDoc = db
+    .prepare(`SELECT 1 FROM documents d WHERE d.id=? AND d.status='published' AND ${access.sql}`)
+    .get(id, ...access.params);
+  if (pubDoc) return;
+
+  throw new HttpError(404, "Document not found or you do not have access.");
 }
 
 function uniqueDocumentId(title: string) {

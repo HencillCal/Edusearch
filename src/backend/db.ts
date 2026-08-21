@@ -540,6 +540,8 @@ export function initializeDatabase() {
   ensureColumn("ocr_jobs", "pipeline_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn("documents", "thumbnail_path", "TEXT");
   ensureColumn("documents", "thumbnail_status", "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn("documents", "thumbnail_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("topics", "show_in_browse", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn("libraries", "join_code_encrypted", "TEXT");
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_documents_visibility ON documents(visibility, library_id, status);",

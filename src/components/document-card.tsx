@@ -263,7 +263,8 @@ export function DocumentCard({
           to="/document/$id"
           params={{ id: doc.id }}
           search={viewerSearch}
-          className="relative aspect-[3/4] w-full overflow-hidden bg-muted/20 border-b border-border/40"
+          className="relative w-full overflow-hidden bg-[#f7f6ef] border-b border-border/40"
+          style={{ height: "160px" }}
         >
           {!imgError ? (
             <img
@@ -271,7 +272,7 @@ export function DocumentCard({
               alt={doc.title}
               loading="lazy"
               onError={() => setImgError(true)}
-              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+              className="h-full w-full object-contain"
             />
           ) : (
             <div className="flex h-full w-full flex-col items-center justify-center p-4 text-center bg-gradient-to-b from-muted/30 to-muted/10">
@@ -284,6 +285,7 @@ export function DocumentCard({
               </span>
             </div>
           )}
+
 
           {/* Quick Floating Badge */}
           <div className="absolute top-2.5 left-2.5 flex flex-wrap gap-1">
@@ -399,14 +401,14 @@ export function CompactDocumentCard({ doc }: { doc: DocDoc | ApiDocument }) {
       params={{ id: doc.id }}
       className="card-lift flex items-center gap-3 rounded-xl border border-border bg-card p-2.5 shadow-soft transition hover:border-brand/40"
     >
-      <div className="relative aspect-[3/4] w-12 shrink-0 overflow-hidden rounded bg-muted/20 border border-border/50">
+      <div className="relative w-12 shrink-0 overflow-hidden rounded bg-[#f7f6ef] border border-border/50" style={{ height: "64px" }}>
         {!imgError ? (
           <img
             src={thumbnailUrl}
             alt={doc.title}
             loading="lazy"
             onError={() => setImgError(true)}
-            className="h-full w-full object-cover"
+            className="h-full w-full object-contain"
           />
         ) : (
           <div className="grid h-full w-full place-items-center">
