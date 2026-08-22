@@ -1683,9 +1683,13 @@ async function analyzeStoredFile(file: StoredInput, user: SessionUser) {
         extracted.text,
         extracted.fileType,
         extracted.pages,
+      ).catch(() =>
+        // AI provider unavailable — fall back to local filename/text inference
+        inferMetadata(file.originalName, extracted.text, extracted.fileType, extracted.pages),
       )),
       fileType: extracted.fileType,
     };
+
     try {
       db.prepare(
         "INSERT OR REPLACE INTO document_processing_cache(sha256, extracted_text, pages, file_type, suggestions_json) VALUES(?,?,?,?,?)",
@@ -2231,7 +2235,16 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
         initialText,
         sourceExtension === ".pdf" ? "PDF" : "Image",
         initialStructure.stats.pages || initialResult.enhancedPaths.length || 1,
+      ).catch(() =>
+        // Fallback: AI call failed (rate-limit / network) — use local inference
+        inferMetadata(
+          originalName,
+          initialText,
+          sourceExtension === ".pdf" ? "PDF" : "Image",
+          initialStructure.stats.pages || 1,
+        ),
       );
+
       const initialPreflight = assessReconstructionQuality(initialStructure, initialMetadata);
       initialPreflight.ready = initialPreflight.errors.length === 0;
       const initialStatus = initialPreflight.ready ? "ready" : "awaiting_correction";
@@ -2356,7 +2369,15 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
         refinedText,
         sourceExtension === ".pdf" ? "PDF" : "Image",
         refinedStructure.stats.pages || refinedResult.enhancedPaths.length || 1,
+      ).catch(() =>
+        inferMetadata(
+          originalName,
+          refinedText,
+          sourceExtension === ".pdf" ? "PDF" : "Image",
+          refinedStructure.stats.pages || 1,
+        ),
       );
+
       const preflight = assessReconstructionQuality(refinedStructure, metadata);
       if (refinedResult.qualityScore < 70)
         preflight.errors.push({
@@ -2475,7 +2496,15 @@ async function processOcrJob(id: string, source: OcrQueueSource, options: OcrQue
         initialText,
         sourceExtension === ".pdf" ? "PDF" : "Image",
         initialStructure.stats.pages || initialResult.enhancedPaths.length || 1,
+      ).catch(() =>
+        inferMetadata(
+          originalName,
+          initialText,
+          sourceExtension === ".pdf" ? "PDF" : "Image",
+          initialStructure.stats.pages || 1,
+        ),
       );
+
       const preflight = assessReconstructionQuality(initialStructure, metadata);
       if (initialResult.qualityScore < 70)
         preflight.errors.push({

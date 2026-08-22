@@ -424,25 +424,33 @@ export async function extractDocument(
       );
     }
 
+    // ── Always determine the real page count from the PDF parser first ──────────
+    // parsePdfText uses pdf-parse which returns numpages even for scanned PDFs
+    // with no embedded text layer. This is the ONE authoritative source of truth.
+    let realPageCount = 1;
     try {
       const parsed = await parsePdfText(file.path);
+      realPageCount = parsed.pages; // numpages from pdf-parse, never 0
       if (parsed.text.trim().length > 30 || process.env.AUTO_OCR_SCANNED_PDF === "false") {
-        return { text: parsed.text, pages: parsed.pages || 1, fileType: "PDF" };
+        // Digital PDF with native text layer — use it directly
+        return { text: parsed.text, pages: realPageCount, fileType: "PDF" };
       }
     } catch {
-      // PDF text layer could not be parsed; try fast OCR
+      // Text layer parse failed — keep realPageCount = 1, continue to OCR path
     }
 
     try {
       const ocr = await runPdfOcr(file.path, { qualityMode: "fast" });
+      // Use real page count from parsePdfText, NOT enhancedPaths.length
+      // (enhancedPaths counts rendered images which may differ from PDF pages)
       return {
         text: ocr.text || "",
-        pages: Math.max(1, ocr.enhancedPaths.length || 1),
+        pages: realPageCount,
         fileType: "PDF",
       };
     } catch {
-      // Scanned PDF with no OCR text; return empty text gracefully so user can upload and title the document
-      return { text: "", pages: 1, fileType: "PDF" };
+      // Scanned PDF where OCR also failed — still return the real page count
+      return { text: "", pages: realPageCount, fileType: "PDF" };
     }
   }
   if (file.extension === ".docx") {
@@ -1793,10 +1801,9 @@ function selectOcrPasses(
 ) {
   const variant = (name: string) => variants.find((item) => item.name === name) ?? variants[0];
   if (options.qualityMode === "fast")
-    return [
-      { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },
-      { ...variant("original-clean"), psm: options.profile === "table" ? 4 : 3 },
-    ];
+    // ONE pass only — fastest possible OCR, editor opens immediately
+    return [{ ...variant("clean"), psm: options.profile === "table" ? 4 : 3 }];
+
   if (options.qualityMode === "balanced")
     return [
       { ...variant("clean"), psm: options.profile === "table" ? 4 : 3 },

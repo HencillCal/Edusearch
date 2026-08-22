@@ -80,9 +80,14 @@ export async function generateDocumentThumbnail(doc: ThumbnailDocData): Promise<
       // For PDFs: MUST render actual first page — never fake it
       const rendered = await renderPdfFirstPage(doc.storagePath, outputPath);
       if (!rendered) {
+        // pdftoppm/pdftocairo unavailable — log for VPS diagnosis
+        console.warn(
+          `[EduSearch thumbnails] pdftoppm/pdftocairo unavailable for doc ${doc.id}; using neutral SVG placeholder. Install poppler-utils on the VPS.`,
+        );
         // Neutral PDF placeholder — no synthetic academic cover
         await generateNeutralPlaceholder(doc, outputPath);
       }
+
     } else {
       // DOCX or other: neutral placeholder
       await generateNeutralPlaceholder(doc, outputPath);
