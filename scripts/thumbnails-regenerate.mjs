@@ -43,6 +43,18 @@ const { promisify } = await import("node:util");
 const { rm } = await import("node:fs/promises");
 const execFileAsync = promisify(execFile);
 
+// Ensure columns exist — db.ts adds them lazily; script may run before server starts
+function ensureColumn(table, column, type) {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  } catch {
+    // Column already exists — ignore
+  }
+}
+ensureColumn("documents", "thumbnail_path", "TEXT");
+ensureColumn("documents", "thumbnail_status", "TEXT NOT NULL DEFAULT 'pending'");
+ensureColumn("documents", "thumbnail_version", "INTEGER NOT NULL DEFAULT 0");
+
 const docs = db
   .prepare(
     `SELECT id, title, storage_path, file_type, thumbnail_path, thumbnail_status
@@ -52,9 +64,9 @@ const docs = db
   )
   .all();
 
-
-
 console.log(`Found ${docs.length} PDF documents to regenerate thumbnails for.`);
+
+
 
 let success = 0;
 let placeholder = 0;
