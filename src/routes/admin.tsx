@@ -1,11 +1,12 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Archive,
   Building2,
   CheckCircle2,
+  Cpu,
   Database,
   Download,
   ExternalLink,
@@ -13,7 +14,10 @@ import {
   FileClock,
   FileText,
   Flag,
+  Globe,
   History,
+  Key,
+  Loader2,
   MessageSquare,
   Pencil,
   Plus,
@@ -21,13 +25,17 @@ import {
   Scale,
   ScanLine,
   Search,
+  Settings,
   ShieldCheck,
   Tags,
   Trash2,
   UserCog,
   UserPlus,
   Users,
+  Wifi,
+  WifiOff,
   XCircle,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SiteHeader } from "@/components/site-header";
@@ -684,7 +692,7 @@ function AdminPage() {
   };
 
   const [activeTab, setActiveTab] = useState<
-    "dashboard" | "review_queue" | "ocr_review" | "documents" | "taxonomy" | "users" | "compliance"
+    "dashboard" | "review_queue" | "ocr_review" | "documents" | "taxonomy" | "users" | "compliance" | "providers"
   >("dashboard");
 
   if (!auth.isLoading && auth.data?.user?.role !== "admin") {
@@ -819,6 +827,17 @@ function AdminPage() {
             }`}
           >
             Reports & Copyright
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("providers")}
+            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition ${
+              activeTab === "providers"
+                ? "bg-brand text-brand-foreground shadow-sm"
+                : "bg-surface text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            AI Providers
           </button>
         </div>
 
@@ -1640,6 +1659,9 @@ function AdminPage() {
             </div>
           </section>
         </div>
+
+        {/* AI PROVIDERS TAB */}
+        {activeTab === "providers" && <AdminProvidersTab />}
       </main>
       <SiteFooter />
       <PromptModal modalState={promptModal} />
@@ -1670,5 +1692,220 @@ function Metric({
       <p className="mt-3 text-2xl font-semibold">{value.toLocaleString()}</p>
       {detail && <p className="mt-1 text-xs text-muted-foreground">{detail}</p>}
     </div>
+  );
+}
+
+// ── AI Providers Tab ──────────────────────────────────────────────────────────
+
+type ProviderInfo = {
+  id: string;
+  name: string;
+  capabilities: string[];
+  verified: boolean;
+  authMode: string;
+  noAuth: boolean;
+};
+
+type ProviderHealth = {
+  providerId: string;
+  status: "connected" | "degraded" | "rate_limited" | "invalid_key" | "unreachable" | "not_configured";
+  latencyMs?: number;
+  keyCount: number;
+  healthyKeyCount: number;
+  message?: string;
+  checkedAt: number;
+};
+
+type ProviderRoute = {
+  capability: string;
+  provider_id: string;
+  model_id?: string;
+  priority: number;
+  enabled: number;
+};
+
+const ALL_CAPABILITIES = ["chat", "vision", "ocr", "tts", "stt", "image_gen", "embeddings"];
+
+function providerStatusIcon(status?: ProviderHealth["status"]) {
+  switch (status) {
+    case "connected":     return <CheckCircle2 className="h-4 w-4 text-green-500" />;
+    case "rate_limited":  return <AlertTriangle className="h-4 w-4 text-yellow-500" />;
+    case "invalid_key":   return <AlertTriangle className="h-4 w-4 text-red-500" />;
+    case "degraded":      return <AlertTriangle className="h-4 w-4 text-orange-400" />;
+    case "unreachable":   return <WifiOff className="h-4 w-4 text-red-500" />;
+    case "not_configured": return <Settings className="h-4 w-4 text-muted-foreground" />;
+    default:              return <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />;
+  }
+}
+
+function providerStatusLabel(status?: ProviderHealth["status"], noAuth?: boolean) {
+  if (!status) return "Not tested";
+  if (status === "not_configured") return noAuth ? "No auth needed" : "No keys";
+  return { connected: "Connected", degraded: "Degraded", rate_limited: "Rate limited", invalid_key: "Invalid key", unreachable: "Unreachable" }[status] ?? status;
+}
+
+function CapBadge({ cap }: { cap: string }) {
+  const colors: Record<string, string> = {
+    chat: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
+    vision: "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300",
+    ocr: "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300",
+    tts: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
+    stt: "bg-teal-100 text-teal-700 dark:bg-teal-900 dark:text-teal-300",
+    image_gen: "bg-pink-100 text-pink-700 dark:bg-pink-900 dark:text-pink-300",
+    embeddings: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300",
+  };
+  return <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium ${colors[cap] ?? "bg-muted text-muted-foreground"}`}>{cap}</span>;
+}
+
+function AdminProvidersTab() {
+  const qc = useQueryClient();
+  const [healthMap, setHealthMap] = useState<Record<string, ProviderHealth>>({});
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [routingOpen, setRoutingOpen] = useState(false);
+
+  const { data: providers = [], isLoading } = useQuery<ProviderInfo[]>({
+    queryKey: ["admin-providers"],
+    queryFn: () => apiFetch("/api/admin/providers"),
+  });
+
+  const { data: routes = [] } = useQuery<ProviderRoute[]>({
+    queryKey: ["admin-provider-routes"],
+    queryFn: () => apiFetch("/api/admin/provider-routes"),
+  });
+
+  async function testOne(id: string) {
+    setTestingId(id);
+    try {
+      const health = await apiFetch<ProviderHealth>(`/api/admin/providers/${id}/test`, { method: "POST" });
+      setHealthMap((m) => ({ ...m, [id]: health }));
+    } catch {
+      setHealthMap((m) => ({ ...m, [id]: { providerId: id, status: "unreachable", keyCount: 0, healthyKeyCount: 0, checkedAt: Date.now() } }));
+    } finally {
+      setTestingId(null);
+    }
+  }
+
+  async function testAll() {
+    for (const p of providers) await testOne(p.id);
+  }
+
+  const saveRoutesMutation = useMutation({
+    mutationFn: (body: ProviderRoute[]) =>
+      apiFetch("/api/admin/provider-routes", { method: "PUT", body: JSON.stringify(body) }),
+    onSuccess: () => { toast.success("Routing saved"); qc.invalidateQueries({ queryKey: ["admin-provider-routes"] }); },
+    onError: () => toast.error("Failed to save routing"),
+  });
+
+  const capableFor = (cap: string) => providers.filter((p) => p.capabilities.includes(cap));
+
+  return (
+    <section className="mt-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-2">
+          <Cpu className="h-5 w-5 text-brand" />
+          <h2 className="text-xl font-semibold">AI Providers</h2>
+          <span className="text-sm text-muted-foreground">— key pools, status &amp; routing</span>
+        </div>
+        <Button variant="outline" size="sm" onClick={testAll} disabled={isLoading || testingId !== null}>
+          <RefreshCw className="h-4 w-4 mr-1.5" /> Test all
+        </Button>
+      </div>
+
+      {/* Provider rows */}
+      <div className="rounded-xl border divide-y">
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12 text-muted-foreground">
+            <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading providers…
+          </div>
+        ) : providers.map((p) => {
+          const h = healthMap[p.id];
+          return (
+            <div key={p.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors flex-wrap">
+              <div className="flex-shrink-0">
+                {testingId === p.id ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" /> : providerStatusIcon(h?.status)}
+              </div>
+              <div className="w-36 flex-shrink-0">
+                <div className="font-medium text-sm">{p.name}</div>
+                <div className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                  {p.noAuth ? <><Globe className="h-3 w-3" /> No auth</> : <><Key className="h-3 w-3" /> {p.authMode}</>}
+                  {!p.verified && <span className="text-yellow-500 ml-1">⚠</span>}
+                </div>
+              </div>
+              <div className={`w-32 text-sm flex-shrink-0 ${h?.status === "connected" ? "text-green-600 dark:text-green-400 font-medium" : "text-muted-foreground"}`}>
+                {providerStatusLabel(h?.status, p.noAuth)}
+                {h?.latencyMs != null && <span className="text-xs ml-1 opacity-60">{h.latencyMs}ms</span>}
+              </div>
+              {!p.noAuth && (
+                <div className="text-xs text-muted-foreground w-20 flex-shrink-0">
+                  {h ? `${h.healthyKeyCount}/${h.keyCount} keys` : "—"}
+                </div>
+              )}
+              <div className="flex gap-1 flex-wrap flex-1 min-w-0">
+                {p.capabilities.map((c) => <CapBadge key={c} cap={c} />)}
+              </div>
+              <Button variant="ghost" size="sm" className="flex-shrink-0 text-xs h-7 px-2" onClick={() => testOne(p.id)} disabled={testingId !== null}>
+                <Wifi className="h-3 w-3 mr-1" /> Test
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* AI Routing */}
+      <div className="rounded-xl border">
+        <button
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-muted/30 transition-colors text-left"
+          onClick={() => setRoutingOpen((v) => !v)}
+        >
+          <span className="flex items-center gap-2 font-semibold text-sm">
+            <Zap className="h-4 w-4" /> Capability Routing
+            <span className="text-xs font-normal text-muted-foreground">— select provider per capability</span>
+          </span>
+          <Database className="h-4 w-4 text-muted-foreground" />
+        </button>
+        {routingOpen && (
+          <div className="border-t divide-y">
+            {ALL_CAPABILITIES.map((cap) => {
+              const capable = capableFor(cap);
+              if (!capable.length) return null;
+              const current = routes.find((r) => r.capability === cap && r.enabled);
+              return (
+                <div key={cap} className="flex items-center gap-4 px-4 py-3 flex-wrap">
+                  <div className="w-24 text-sm font-medium capitalize">{cap}</div>
+                  <select
+                    className="border rounded px-2 py-1 text-sm bg-background"
+                    defaultValue={current?.provider_id ?? ""}
+                    onChange={(e) => {
+                      const pid = e.target.value;
+                      const others = routes.filter((r) => r.capability !== cap);
+                      const updated = pid ? [...others, { capability: cap, provider_id: pid, priority: 1, enabled: 1 }] : others;
+                      saveRoutesMutation.mutate(updated);
+                    }}
+                  >
+                    <option value="">— Auto —</option>
+                    {capable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  {saveRoutesMutation.isPending && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Notes */}
+      <div className="text-xs text-muted-foreground rounded-xl border p-4 space-y-1">
+        <div className="font-medium text-foreground mb-2">Configuration notes (.env)</div>
+        <div>• <strong>Groq</strong> keys start <code className="bg-muted px-1 rounded">gsk_...</code> → <code className="bg-muted px-1 rounded">GROQ_API_KEYS</code></div>
+        <div>• <strong>OpenAI</strong> keys start <code className="bg-muted px-1 rounded">sk-...</code> → <code className="bg-muted px-1 rounded">OPENAI_API_KEYS</code></div>
+        <div>• <strong>Gemini</strong> keys start <code className="bg-muted px-1 rounded">AIza...</code> → <code className="bg-muted px-1 rounded">GEMINI_API_KEYS</code></div>
+        <div>• <strong>NVIDIA NIM</strong> keys start <code className="bg-muted px-1 rounded">nvapi-...</code> → <code className="bg-muted px-1 rounded">NVIDIA_API_KEYS</code></div>
+        <div>• <strong>ElevenLabs</strong> uses <code className="bg-muted px-1 rounded">xi-api-key</code> header (NOT Bearer) → <code className="bg-muted px-1 rounded">ELEVENLABS_API_KEYS</code></div>
+        <div>• <strong>OCR.space</strong> → <code className="bg-muted px-1 rounded">OCRSPACE_API_KEYS</code></div>
+        <div>• <strong>David Cyril</strong> &amp; <strong>SilvaTech</strong> require no API key</div>
+        <div className="mt-2 pt-2 border-t">Multiple keys: <code className="bg-muted px-1 rounded">GROQ_API_KEYS=gsk_key1,gsk_key2,gsk_key3</code> — rotated automatically</div>
+      </div>
+    </section>
   );
 }

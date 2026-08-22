@@ -553,6 +553,29 @@ export function initializeDatabase() {
     WHERE status <> 'processing'
   `);
 
+  // Provider infrastructure tables (added by provider upgrade)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_routes (
+      capability  TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      model_id    TEXT,
+      priority    INTEGER NOT NULL DEFAULT 1,
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      cost_tier   TEXT,
+      PRIMARY KEY (capability, provider_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS provider_models_cache (
+      provider_id    TEXT NOT NULL,
+      model_id       TEXT NOT NULL,
+      display_name   TEXT,
+      capabilities   TEXT,
+      context_length INTEGER,
+      cached_at      INTEGER NOT NULL,
+      PRIMARY KEY (provider_id, model_id)
+    );
+  `);
+
   initialized = true;
   seedBaseData();
   cleanupExpiredData();

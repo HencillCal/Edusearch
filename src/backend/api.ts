@@ -320,6 +320,14 @@ async function routeRequest(request: Request, url: URL): Promise<Response> {
   if (method === "GET" && pathname === "/api/admin/audit") return adminAudit(request, url);
   if (method === "GET" && pathname === "/api/admin/users") return adminUsers(request, url);
   if (method === "POST" && pathname === "/api/admin/users") return createAdminUser(request);
+  // ── AI provider admin routes ────────────────────────────────────────────────
+  if (method === "GET" && pathname === "/api/admin/providers") return adminListProviders(request);
+  if (method === "GET" && pathname === "/api/admin/provider-routes") return adminGetProviderRoutes(request);
+  if (method === "PUT" && pathname === "/api/admin/provider-routes") return adminSaveProviderRoutes(request);
+  const providerTestMatch = pathname.match(/^\/api\/admin\/providers\/([^/]+)\/test$/);
+  if (providerTestMatch && method === "POST") return adminTestProvider(request, providerTestMatch[1]);
+  const providerModelsMatch = pathname.match(/^\/api\/admin\/providers\/([^/]+)\/models$/);
+  if (providerModelsMatch && method === "GET") return adminProviderModels(request, providerModelsMatch[1], url);
   if (method === "POST" && pathname === "/api/admin/search/reindex") return reindexSearch(request);
   if (method === "POST" && pathname === "/api/admin/subjects") return createSubject(request);
   if (method === "POST" && pathname === "/api/admin/topics") return createTopic(request);
@@ -5507,45 +5515,101 @@ function normalizeOcrLanguage(value: unknown) {
   );
 }
 
+// ── AI Provider Admin Handlers ─────────────────────────────────────────────────
+
+async function adminListProviders(request: Request) {
+  requireAdmin(request);
+  const { registry } = await import("./providers/registry.js");
+  registry.init();
+  const providers = registry.getAllProviders().map((a) => {
+    const pool = (a as unknown as { pool?: { summary(): unknown } }).pool;
+    // pool is on the adapter but not in the interface — use summary if available
+    return {
+      id: a.config.id,
+      name: a.config.name,
+      capabilities: a.config.capabilities,
+      verified: a.config.verified,
+      authMode: a.config.authMode,
+      noAuth: a.config.noAuth ?? false,
+    };
+  });
+  return json(providers);
+}
+
+async function adminTestProvider(request: Request, providerId: string) {
+  requireAdmin(request);
+  const { registry } = await import("./providers/registry.js");
+  registry.init();
+  const adapter = registry.getProvider(providerId);
+  if (!adapter) return json({ error: "Provider not found" }, 404);
+  try {
+    const health = await adapter.health();
+    return json(health);
+  } catch (err) {
+    return json({ providerId, status: "unreachable", message: err instanceof Error ? err.message : String(err), keyCount: 0, healthyKeyCount: 0, checkedAt: Date.now() });
+  }
+}
+
+async function adminProviderModels(request: Request, providerId: string, url: URL) {
+  requireAdmin(request);
+  const { registry } = await import("./providers/registry.js");
+  registry.init();
+  const forceRefresh = url.searchParams.get("refresh") === "1";
+  const models = await registry.getModels(providerId, forceRefresh);
+  return json({ providerId, models });
+}
+
+function adminGetProviderRoutes(request: Request) {
+  requireAdmin(request);
+  const db = getDb();
+  const routes = db.prepare("SELECT * FROM provider_routes ORDER BY capability, priority").all();
+  return json(routes);
+}
+
+async function adminSaveProviderRoutes(request: Request) {
+  requireAdmin(request);
+  const body = (await request.json()) as Array<{
+    capability: string; provider_id: string; model_id?: string; priority?: number; enabled?: number; cost_tier?: string;
+  }>;
+  const db = getDb();
+  const upsert = db.prepare(
+    "INSERT INTO provider_routes(capability,provider_id,model_id,priority,enabled,cost_tier) VALUES(?,?,?,?,?,?) ON CONFLICT(capability,provider_id) DO UPDATE SET model_id=excluded.model_id,priority=excluded.priority,enabled=excluded.enabled,cost_tier=excluded.cost_tier"
+  );
+  for (const r of body) {
+    upsert.run(r.capability, r.provider_id, r.model_id ?? null, r.priority ?? 1, r.enabled ?? 1, r.cost_tier ?? null);
+  }
+  return json({ ok: true, updated: body.length });
+}
+
 async function suggestMetadata(filename: string, text: string, fileType: string, pages: number) {
   const deterministic = inferMetadata(filename, text, fileType, pages);
-  const aiBaseUrl = process.env.AI_BASE_URL?.replace(/\/$/, "");
-  const model = process.env.AI_CHAT_MODEL;
-  if (!aiBaseUrl || !model) return deterministic;
+  // Require at least a model name to attempt AI suggestion
+  const model =
+    process.env.AI_CHAT_MODEL ??
+    process.env.GROQ_DEFAULT_MODEL ??
+    process.env.OPENAI_DEFAULT_MODEL ??
+    "";
+  if (!model) return deterministic;
   try {
-    const response = await fetch(`${aiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(process.env.AI_API_KEY ? { authorization: `Bearer ${process.env.AI_API_KEY}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.1,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You classify academic documents for EduSearch AI. Return strict JSON with title, subject, topics (array), docType, year, level, language, description, keywords (array), institution, author. Institution and author may be empty. Never invent facts that are not supported by the filename or text.",
-          },
-          {
-            role: "user",
-            content: `Filename: ${filename}\nFile type: ${fileType}\nPages: ${pages}\n\nExtracted text:\n${text.slice(0, 12000)}`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(25_000),
+    const { ProviderRouter } = await import("./providers/router.js");
+    const result = await ProviderRouter.chat({
+      model,
+      temperature: 0.1,
+      responseFormat: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You classify academic documents for EduSearch AI. Return strict JSON with title, subject, topics (array), docType, year, level, language, description, keywords (array), institution, author. Institution and author may be empty. Never invent facts that are not supported by the filename or text.",
+        },
+        {
+          role: "user",
+          content: `Filename: ${filename}\nFile type: ${fileType}\nPages: ${pages}\n\nExtracted text:\n${text.slice(0, 12000)}`,
+        },
+      ],
+      timeoutMs: 25_000,
     });
-    if (!response.ok) return deterministic;
-    const payload = (await response.json()) as Record<string, unknown>;
-    const content = String(
-      (
-        (payload.choices as Array<Record<string, unknown>> | undefined)?.[0]?.message as
-          Record<string, unknown> | undefined
-      )?.content || "",
-    );
-    return normalizeMetadata(JSON.parse(content), deterministic);
+    return normalizeMetadata(JSON.parse(result.content), deterministic);
   } catch {
     return deterministic;
   }
