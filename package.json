@@ -83,11 +83,12 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "1.1.1",
     "sharp": "^0.34.3",
-    "tesseract.js": "^6.0.1"
+    "tesseract.js": "^6.0.1",
+    "@lovable.dev/vite-tanstack-config": "^2.7.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
-    "@lovable.dev/vite-tanstack-config": "^2.7.7",
+
     "@types/node": "^22.16.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

@@ -8,28 +8,35 @@
  */
 
 import path from "node:path";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 
-// We need to import the compiled output because TypeScript source can't run directly.
-// Build must be done first: npm run build
-// But since we are in scripts/ we use tsx / ts-node via package.json script.
-
-// Load DB
-const Database = (await import("better-sqlite3")).default;
+// Load sharp from the installed node_modules
 const sharp = (await import("sharp")).default;
 
-const dbPath = path.resolve(rootDir, "data", "edusearch.db");
+// DB path must match what db.ts creates (edusearch.sqlite, not edusearch.db)
+const dbPath = path.resolve(
+  process.env.DATA_DIR || path.join(rootDir, "data"),
+  "edusearch.sqlite",
+);
 if (!existsSync(dbPath)) {
   console.error("Database not found at", dbPath);
+  console.error("Make sure the app has been started at least once to initialize the DB.");
   process.exit(1);
 }
 
-const db = new Database(dbPath, { readonly: false });
-const thumbnailsDir = path.resolve(rootDir, "data", "thumbnails");
+const db = new DatabaseSync(dbPath);
+db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+
+const thumbnailsDir = path.resolve(
+  process.env.DATA_DIR || path.join(rootDir, "data"),
+  "thumbnails",
+);
+mkdirSync(thumbnailsDir, { recursive: true });
 
 const { execFile } = await import("node:child_process");
 const { promisify } = await import("node:util");
@@ -40,10 +47,12 @@ const docs = db
   .prepare(
     `SELECT id, title, storage_path, file_type, thumbnail_path, thumbnail_status
      FROM documents
-     WHERE file_type='PDF' AND status='published'
+     WHERE file_type='PDF' AND status IN ('published','awaiting_review','approved','draft','uploaded')
      ORDER BY created_at DESC`,
   )
   .all();
+
+
 
 console.log(`Found ${docs.length} PDF documents to regenerate thumbnails for.`);
 
